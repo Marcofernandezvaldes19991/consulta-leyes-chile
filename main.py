@@ -12,8 +12,8 @@ from cachetools import TTLCache
 
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
-    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché, mejoras en la extracción de datos y truncamiento de texto largo.",
-    version="1.4.0", 
+    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché, mejoras en la extracción de datos y truncamiento de texto largo ajustado.",
+    version="1.5.0", 
     servers=[
         {
             "url": "https://consulta-leyes-chile.onrender.com", 
@@ -75,8 +75,8 @@ WORDS_TO_INT = {
 }
 
 # --- Constantes para Truncamiento ---
-MAX_TEXT_LENGTH = 28000  # Límite de caracteres para el texto de un artículo
-TRUNCATION_MESSAGE = "\n\n[... texto truncado por longitud excesiva ...]"
+MAX_TEXT_LENGTH = 15000  # Límite de caracteres AJUSTADO para el texto de un artículo
+TRUNCATION_MESSAGE = "\n\n[... texto completo del artículo truncado por exceder el límite de longitud para esta API. Consulte la fuente original para el texto íntegro ...]"
 
 # --- Modelos Pydantic ---
 class Articulo(BaseModel):
@@ -101,6 +101,9 @@ class ArticuloHTML(BaseModel):
     texto_html_extraido: str = Field(..., description="El texto HTML extraído, con formato mejorado. Puede estar truncado si excede el límite de longitud.")
 
 # --- Funciones de Lógica de Negocio ---
+# (Las funciones normalizar_numero_articulo_para_comparacion, limpiar_texto_articulo, 
+#  extraer_referencias_legales_mejorado, obtener_id_norma_async, obtener_xml_ley_async 
+#  se mantienen igual que en la versión v12. Se omiten aquí por brevedad pero deben estar presentes)
 
 def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
     if not num_str: return "s/n"
@@ -146,25 +149,24 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
 def limpiar_texto_articulo(texto: str) -> str:
     if not texto: return ""
     texto_limpio = re.sub(r'[ \t]+', ' ', texto)
-    texto_limpio = re.sub(r'\n\s*\n+', '\n', texto_limpio) # Reduce múltiples saltos de línea a uno solo
+    texto_limpio = re.sub(r'\n\s*\n+', '\n', texto_limpio) 
     texto_limpio = "\n".join([line.strip() for line in texto_limpio.split('\n')])
     return texto_limpio.strip()
 
 def extraer_referencias_legales_mejorado(texto_articulo: str) -> List[str]:
     if not texto_articulo: return []
-    # Patrones mejorados para capturar referencias legales más completas.
     patrones = [
-        r"ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+",  # Ley N° X.XXX
-        r"decreto\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+", # Decreto Ley N° XXX
-        r"decreto\s+con\s+fuerza\s+de\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*Ministerio\s+d[e|el][\s\w]+(?:\s+y\s+[\s\w]+)*)?)?", # DFL N° X, de AÑO, de MINISTERIO
-        r"D\.F\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+(?:/\d+)?", # D.F.L. N° X
-        r"D\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+",      # D.L. N° X
-        r"C[óo]digo\s+(?:Penal|Tributario|Civil|del\s+Trabajo|de\s+Comercio|Procesal\s+Penal|Sanitario|de\s+Miner[íi]a|de\s+Aguas)(?:\s+y\s+sus\s+modificaciones)?", # Códigos específicos
+        r"ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+",
+        r"decreto\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+",
+        r"decreto\s+con\s+fuerza\s+de\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?",
+        r"D\.F\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+(?:/\d+)?",
+        r"D\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+",
+        r"C[óo]digo\s+(?:Penal|Tributario|Civil|del\s+Trabajo|de\s+Comercio|Procesal\s+Penal|Sanitario|de\s+Miner[íi]a|de\s+Aguas)(?:\s+y\s+sus\s+modificaciones)?",
         r"art[íi]culo\s+[\w\d]+(?:\s*bis)?\s+d[e|el]\s+(?:presente\s+ley|esta\s+ley|la\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|C[óo]digo\s+\w+|D\.F\.L\.?\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|decreto\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+)",
-        r"inciso\s+\w+\s+del\s+art[íi]culo\s+[\w\d]+(?:\s*bis)?", # Inciso X del artículo Y (de la misma ley)
+        r"inciso\s+\w+\s+del\s+art[íi]culo\s+[\w\d]+(?:\s*bis)?",
         r"reglamento\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+",
         r"Constituci[oó]n\s+Pol[íi]tica\s+de\s+la\s+Rep[úu]blica",
-        r"decreto\s+supremo\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*Ministerio\s+d[e|el][\s\w]+(?:\s+y\s+[\s\w]+)*)?)?",
+        r"decreto\s+supremo\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?",
     ]
     referencias_encontradas = set()
     texto_norm_espacios = re.sub(r'\s+', ' ', texto_articulo)
@@ -269,9 +271,10 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Articulo]:
         if not texto_neto_articulo.strip() and numero_display_extraido == texto_completo_articulo: texto_neto_articulo = numero_display_extraido
         
         texto_final_limpio = limpiar_texto_articulo(texto_neto_articulo) 
-        if len(texto_final_limpio) > MAX_TEXT_LENGTH: # Truncar si es necesario
+        if len(texto_final_limpio) > MAX_TEXT_LENGTH: 
             logger.warning(f"Artículo (display='{numero_display_extraido}', id_interno='{numero_id_interno}') texto truncado. Longitud original: {len(texto_final_limpio)}")
-            texto_final_limpio = texto_final_limpio[:MAX_TEXT_LENGTH] + TRUNCATION_MESSAGE
+            # Truncar asegurando que no se corte a mitad de una palabra
+            texto_final_limpio = texto_final_limpio[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE
         
         referencias_finales = extraer_referencias_legales_mejorado(texto_final_limpio) 
 
@@ -305,12 +308,12 @@ async def consultar_ley(
             raise HTTPException(status_code=400, detail=f"No se pudo normalizar el artículo buscado: '{articulo}'.")
         
         articulo_encontrado_obj: Optional[Articulo] = None
-        for art_obj in articulos_data: # Búsqueda por ID exacto
+        for art_obj in articulos_data: 
             if art_obj.articulo_id_interno == articulo_buscado_norm:
                 articulo_encontrado_obj = art_obj
                 break
         
-        if not articulo_encontrado_obj: # Si no se encontró por ID, intentar búsqueda textual
+        if not articulo_encontrado_obj: 
             try:
                 termino_busqueda_texto = re.escape(articulo_buscado_norm.replace("t",""))
                 patron_texto = re.compile(r"\b(?:art(?:ículo|iculo)?s?\.?|art\.?|disposición|disp\.?)\s+(?:transitorio|trans\.?\s*)?" + termino_busqueda_texto + r"(?:[\sº°ªÞ,\.;:\(\)]|\b|$)", re.IGNORECASE)
@@ -319,20 +322,19 @@ async def consultar_ley(
                 if patron_texto.search(art_obj.texto):
                     art_obj.nota_busqueda = f"Encontrado por mención de '{articulo}' (normalizado a '{articulo_buscado_norm}') en texto."
                     articulo_encontrado_obj = art_obj
-                    break # Tomar la primera coincidencia textual
+                    break 
 
         if articulo_encontrado_obj:
             return LeyDetalle(
                 ley=numero_ley, 
                 id_norma=id_norma, 
                 articulos_totales=1, 
-                articulos=[articulo_encontrado_obj] # Devolver LeyDetalle con un solo artículo
+                articulos=[articulo_encontrado_obj] 
             )
-        else: # Si no se encontró de ninguna forma
+        else: 
             ids_internos = [a.articulo_id_interno for a in articulos_data]; displays = [a.articulo_display for a in articulos_data]
             raise HTTPException(status_code=404, detail={"error": f"Artículo '{articulo}' (buscado como '{articulo_buscado_norm}') no encontrado.", "sugerencia": "Verifique número.", "ids_disponibles": ids_internos[:10], "displays_disponibles": displays[:10]})
     
-    # Si no se especificó un artículo, devolver la ley completa
     return LeyDetalle(ley=numero_ley, id_norma=id_norma, articulos_totales=len(articulos_data), articulos=articulos_data)
 
 
@@ -367,7 +369,8 @@ async def consultar_articulo_html(
 
         if len(texto_limpio_final) > MAX_TEXT_LENGTH: # Usar MAX_TEXT_LENGTH también aquí
             logger.warning(f"Texto HTML para idNorma {idNorma}, idParte {idParte} truncado. Longitud original: {len(texto_limpio_final)}")
-            texto_limpio_final = texto_limpio_final[:MAX_TEXT_LENGTH] + TRUNCATION_MESSAGE
+            # Truncar asegurando que no se corte a mitad de una palabra
+            texto_limpio_final = texto_limpio_final[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE
         
         return ArticuloHTML(idNorma=idNorma, idParte=idParte, url_fuente=url, selector_usado=selector_usado, texto_html_extraido=texto_limpio_final)
     except Exception as e: raise HTTPException(status_code=500, detail=f"Error al procesar HTML para idParte '{idParte}': {e}")
