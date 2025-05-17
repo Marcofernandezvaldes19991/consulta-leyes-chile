@@ -82,10 +82,21 @@ def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
     articulos = extraer_articulos(xml)
 
     if articulo:
+        # Normalización de número
+        articulo_normalizado = str(int(articulo)).strip()
+
         for art in articulos:
-            if art["articulo"] == articulo or art["articulo"] == str(int(articulo)):
+            if art["articulo"].strip() == articulo_normalizado:
                 return art
-        return {"error": f"Artículo {articulo} no encontrado"}
-    else:
-        return {"articulos": articulos}
+            if f"Artículo {articulo_normalizado}" in art["texto"]:
+                return art
+            if f"Art. {articulo_normalizado}" in art["texto"]:
+                return art
+
+        return {
+            "error": f"Artículo {articulo} no encontrado",
+            "debug": [a["articulo"] for a in articulos]  # Para depuración
+        }
+
+    return {"articulos": articulos}
 
