@@ -12,6 +12,8 @@ with open("fallbacks.json", "r", encoding="utf-8") as f:
     fallback_ids = json.load(f)
 
 def obtener_id_norma(numero_ley):
+    numero_ley = str(numero_ley)  # <-- Asegura que sea string
+
     # Fallback manual
     if numero_ley in fallback_ids:
         return fallback_ids[numero_ley]
