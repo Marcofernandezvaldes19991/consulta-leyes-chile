@@ -13,7 +13,7 @@ from cachetools import TTLCache
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
     description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché, y truncamiento de listas de artículos y texto largo.",
-    version="1.7.0", 
+    version="1.8.0", # Incremento de versión por mejoras en diagnóstico HTML
     servers=[
         {
             "url": "https://consulta-leyes-chile.onrender.com", 
@@ -104,6 +104,9 @@ class ArticuloHTML(BaseModel):
     texto_html_extraido: str = Field(..., description="El texto HTML extraído, con formato mejorado. Puede estar truncado si excede el límite de longitud.")
 
 # --- Funciones de Lógica de Negocio ---
+# (Las funciones normalizar_numero_articulo_para_comparacion, limpiar_texto_articulo, 
+#  extraer_referencias_legales_mejorado, obtener_id_norma_async, obtener_xml_ley_async 
+#  se mantienen igual que en la versión v17. Se omiten aquí por brevedad pero deben estar presentes)
 
 def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
     if not num_str: return "s/n"
@@ -123,7 +126,6 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
     s = re.sub(r"[º°ª\.,]", "", s)
     s = s.strip().rstrip('-').strip()
     partes_numericas = re.findall(r"(\d+)\s*([a-zA-Z]*)", s)
-    logger.debug(f"Partes numéricas encontradas en '{s}': {partes_numericas}")
     componentes_normalizados = []
     texto_restante = s
     for num_part, letra_part in partes_numericas:
@@ -132,23 +134,16 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
             if letra_part in ["bis", "ter", "quater"] or (len(letra_part) == 1 and letra_part.isalpha()): componente += letra_part
         componentes_normalizados.append(componente)
         texto_restante = texto_restante.replace(num_part, "", 1).replace(letra_part, "", 1).strip()
-    logger.debug(f"Componentes normalizados de partes numéricas: {componentes_normalizados}, texto restante: '{texto_restante}'")
-    if not componentes_normalizados and texto_restante: 
-        posible_romano = texto_restante.replace(" ", "") 
-        if posible_romano in ROMAN_TO_INT: 
+    if not componentes_normalizados and texto_restante:
+        posible_romano = texto_restante.replace(" ", "")
+        if posible_romano in ROMAN_TO_INT:
             componentes_normalizados.append(str(ROMAN_TO_INT[posible_romano]))
-            logger.debug(f"Componente romano añadido: '{str(ROMAN_TO_INT[posible_romano])}' desde '{posible_romano}'")
             texto_restante = ""
-    if not componentes_normalizados and texto_restante: 
-        componentes_normalizados.append(texto_restante.replace(" ", ""))
-        logger.debug(f"Componente de texto restante añadido: '{texto_restante.replace(' ', '')}'")
+    if not componentes_normalizados and texto_restante: componentes_normalizados.append(texto_restante.replace(" ", ""))
     id_final = "".join(componentes_normalizados)
-    if not id_final: 
-        s_limpio = re.sub(r"[^a-z0-9]", "", s.replace(" ", "")).strip() 
-        logger.debug(f"ID final estaba vacío. s='{s}', s_limpio='{s_limpio}'")
-        if not s_limpio: 
-            logger.warning(f"Error de normalización para '{num_str}'. No se pudo extraer un ID limpio.")
-            return "s/n_error_normalizacion"
+    if not id_final:
+        s_limpio = re.sub(r"[^a-z0-9]", "", s.replace(" ", "")).strip()
+        if not s_limpio: return "s/n_error_normalizacion"
         id_final = s_limpio
     id_con_prefijo = prefijo_transitorio + id_final if id_final else "s/n"
     logger.debug(f"Normalización final para '{num_str}': '{id_con_prefijo}'")
@@ -365,24 +360,39 @@ async def consultar_articulo_html(
 ):
     logger.info(f"Consultando HTML desde bcn.cl para idNorma: {idNorma}, idParte: {idParte}")
     url = f"https://www.bcn.cl/leychile/navegar?idNorma={idNorma}&idParte={idParte}"
+    
     async with httpx.AsyncClient() as client:
         try:
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'}
             response = await client.get(url, timeout=10, headers=headers)
+            logger.debug(f"Respuesta de /ley_html para {url} - Status: {response.status_code}")
+            logger.debug(f"Headers de respuesta de /ley_html: {response.headers}")
+            # Loggear el inicio del HTML para verificar si es lo que esperamos
+            response_text_snippet = response.text[:1500] if response.text else "Respuesta vacía"
+            logger.debug(f"Inicio del HTML recibido de /ley_html (primeros 1500 chars):\n{response_text_snippet}")
             response.raise_for_status()
-        except httpx.TimeoutException: raise HTTPException(status_code=504, detail=f"Timeout al obtener HTML desde {url}")
-        except httpx.RequestError as e: raise HTTPException(status_code=502, detail=f"Error HTTP al obtener HTML desde {url}: {e}")
+        except httpx.TimeoutException: 
+            error_message = f"Timeout al obtener HTML para idNorma {idNorma}, idParte {idParte} desde {url}"
+            logger.error(error_message)
+            raise HTTPException(status_code=504, detail=error_message)
+        except httpx.RequestError as e: 
+            error_message = f"Error en petición HTTP para HTML (idNorma {idNorma}, idParte {idParte}) desde {url}: {e}"
+            logger.exception(error_message)
+            raise HTTPException(status_code=502, detail=f"No se pudo obtener el contenido de {url}. Error: {e}")
+
     try:
         soup = BeautifulSoup(response.text, "html.parser")
+        # Selectores corregidos para usar la sintaxis de atributo para IDs
         selectores_posibles = [
             f"div[id=\"p{idParte}\"]",      
             f"article[id=\"{idParte}\"]",  
-            f"div.textoNorma[id*='{idParte}']", 
+            f"div.textoNorma[id*='{idParte}']", # Este es el que probablemente debería funcionar
             f"div.textoArticulo[id*='{idParte}']",
             f"div[id='{idParte}']"         
         ]
         div_contenido = None; selector_usado = "Ninguno"
-        for selector in selectores_posibles:
+        for selector_idx, selector in enumerate(selectores_posibles):
+            logger.debug(f"Intentando selector HTML #{selector_idx + 1}: '{selector}'")
             try:
                 div_temp = soup.select_one(selector)
                 if div_temp: 
@@ -390,20 +400,30 @@ async def consultar_articulo_html(
                     selector_usado = selector
                     logger.info(f"Contenido encontrado para idParte '{idParte}' usando selector CSS '{selector}'")
                     break
+                else:
+                    logger.debug(f"Selector '{selector}' no encontró nada.")
             except Exception as e_selector: 
                 logger.warning(f"Error al usar selector '{selector}': {e_selector}")
                 continue 
 
         if not div_contenido: 
             logger.info(f"Selectores específicos no encontraron contenido para idParte '{idParte}'. Intentando fallback con regex en ID.")
-            div_contenido = soup.find("div", id=re.compile(f".*{re.escape(idParte)}.*", re.IGNORECASE))
-            if div_contenido: 
-                selector_usado = f"Fallback regex: div con id que contiene '{idParte}' (id real: {div_contenido.get('id')})"
-                logger.info(f"Contenido encontrado para idParte '{idParte}' usando {selector_usado}")
-            else: 
-                error_message = f"No se encontró contenido para idParte '{idParte}' en norma '{idNorma}' con los selectores probados en {url}."
-                logger.error(error_message)
-                raise HTTPException(status_code=404, detail=f"No se encontró el elemento de contenido específico para idParte '{idParte}'.")
+            try:
+                # Fallback: buscar cualquier div cuyo ID contenga el idParte.
+                # Esto es más general y podría capturar el div correcto si los selectores CSS son muy específicos.
+                div_contenido = soup.find("div", id=re.compile(f".*{re.escape(idParte)}.*", re.IGNORECASE))
+                if div_contenido: 
+                    selector_usado = f"Fallback regex: div con id que contiene '{idParte}' (id real: {div_contenido.get('id')})"
+                    logger.info(f"Contenido encontrado para idParte '{idParte}' usando {selector_usado}")
+                else: 
+                    error_message = f"No se encontró contenido para idParte '{idParte}' en norma '{idNorma}' con los selectores probados en {url}."
+                    logger.error(error_message)
+                    # Loggear el HTML completo si no se encuentra nada, para depuración manual
+                    logger.debug(f"HTML completo donde no se encontró idParte '{idParte}':\n{response.text}")
+                    raise HTTPException(status_code=404, detail=f"No se encontró el elemento de contenido específico para idParte '{idParte}'.")
+            except Exception as e_fallback:
+                logger.exception(f"Error durante el fallback de búsqueda de div_contenido para idParte '{idParte}'.")
+                raise HTTPException(status_code=500, detail=f"Error interno al intentar fallback de búsqueda para idParte '{idParte}'.")
         
         texto_extraido = div_contenido.get_text(separator="\n", strip=True)
         texto_limpio_final = limpiar_texto_articulo(texto_extraido)
@@ -413,6 +433,8 @@ async def consultar_articulo_html(
             texto_limpio_final = texto_limpio_final[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE_TEXT
         
         return ArticuloHTML(idNorma=idNorma, idParte=idParte, url_fuente=url, selector_usado=selector_usado, texto_html_extraido=texto_limpio_final)
+    except HTTPException as http_exc: # Re-lanzar HTTPException si ya fue generada
+        raise http_exc
     except Exception as e: 
         error_message = f"Error al parsear HTML o extraer texto para idNorma {idNorma}, idParte {idParte}."
         logger.exception(error_message) 
