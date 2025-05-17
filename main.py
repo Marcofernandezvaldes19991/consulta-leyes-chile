@@ -12,8 +12,8 @@ from cachetools import TTLCache
 
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
-    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché, mejoras en la extracción de datos y truncamiento de texto largo ajustado.",
-    version="1.5.0", 
+    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché, y truncamiento de listas de artículos y texto largo.",
+    version="1.6.0", 
     servers=[
         {
             "url": "https://consulta-leyes-chile.onrender.com", 
@@ -60,7 +60,7 @@ except Exception as e:
     fallback_ids = {}
     logger.exception(f"Ocurrió un error inesperado al cargar 'fallbacks.json'.")
 
-# --- Constantes para Normalización ---
+# --- Constantes para Normalización y Truncamiento ---
 ROMAN_TO_INT = {
     'i': 1, 'ii': 2, 'iii': 3, 'iv': 4, 'v': 5, 'vi': 6, 'vii': 7, 'viii': 8, 'ix': 9, 'x': 10,
     'xi': 11, 'xii': 12, 'xiii': 13, 'xiv': 14, 'xv': 15, 'xvi': 16, 'xvii': 17, 'xviii': 18, 'xix': 19, 'xx': 20,
@@ -73,10 +73,10 @@ WORDS_TO_INT = {
     'unico': 'unico', 'final': 'final', 
     'único': 'unico', 
 }
-
-# --- Constantes para Truncamiento ---
-MAX_TEXT_LENGTH = 15000  # Límite de caracteres AJUSTADO para el texto de un artículo
-TRUNCATION_MESSAGE = "\n\n[... texto completo del artículo truncado por exceder el límite de longitud para esta API. Consulte la fuente original para el texto íntegro ...]"
+MAX_TEXT_LENGTH = 10000  # Límite de caracteres REDUCIDO para el texto de un artículo
+MAX_ARTICULOS_RETURNED = 15 # Límite de artículos a devolver si se pide la ley completa
+TRUNCATION_MESSAGE_TEXT = "\n\n[... texto completo del artículo truncado por exceder el límite de longitud para esta API. Consulte la fuente original para el texto íntegro ...]"
+TRUNCATION_MESSAGE_LIST = f"Mostrando los primeros {MAX_ARTICULOS_RETURNED} artículos. La ley contiene más artículos. Para ver un artículo específico, por favor especifíquelo en la consulta."
 
 # --- Modelos Pydantic ---
 class Articulo(BaseModel):
@@ -90,8 +90,11 @@ class Articulo(BaseModel):
 class LeyDetalle(BaseModel):
     ley: str = Field(..., description="El número de ley consultado.")
     id_norma: str = Field(..., description="El IdNorma interno de la ley en LeyChile.cl.")
-    articulos_totales: int = Field(..., description="El número total de artículos contenidos en esta respuesta.")
-    articulos: List[Articulo] = Field(..., description="La lista de artículos (puede ser uno solo si se buscó un artículo específico).")
+    articulos_totales_en_respuesta: int = Field(..., description="El número total de artículos contenidos en ESTA respuesta (puede estar truncado).")
+    articulos: List[Articulo] = Field(..., description="La lista de artículos (puede ser uno solo si se buscó un artículo específico, o una lista truncada si la ley es muy extensa).")
+    total_articulos_originales_en_ley: Optional[int] = Field(None, description="El número total de artículos que tiene la ley originalmente, si la lista de artículos devuelta fue truncada.")
+    nota_truncamiento_lista: Optional[str] = Field(None, description="Nota indicando si la lista de artículos fue truncada.")
+
 
 class ArticuloHTML(BaseModel):
     idNorma: str
@@ -273,8 +276,7 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Articulo]:
         texto_final_limpio = limpiar_texto_articulo(texto_neto_articulo) 
         if len(texto_final_limpio) > MAX_TEXT_LENGTH: 
             logger.warning(f"Artículo (display='{numero_display_extraido}', id_interno='{numero_id_interno}') texto truncado. Longitud original: {len(texto_final_limpio)}")
-            # Truncar asegurando que no se corte a mitad de una palabra
-            texto_final_limpio = texto_final_limpio[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE
+            texto_final_limpio = texto_final_limpio[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE_TEXT
         
         referencias_finales = extraer_referencias_legales_mejorado(texto_final_limpio) 
 
@@ -299,16 +301,22 @@ async def consultar_ley(
         if not id_norma: raise HTTPException(status_code=404, detail=f"No se encontró ID para la ley {numero_ley}.")
         xml_content = await obtener_xml_ley_async(id_norma, client)
         if not xml_content: raise HTTPException(status_code=503, detail=f"No se pudo obtener XML para ley {numero_ley} (ID Norma: {id_norma}).")
-    articulos_data = extraer_articulos(xml_content) 
-    if not articulos_data: raise HTTPException(status_code=404, detail=f"No se extrajeron artículos de la ley {numero_ley} (ID Norma: {id_norma}).")
     
+    articulos_data_original = extraer_articulos(xml_content) 
+    if not articulos_data_original: 
+        raise HTTPException(status_code=404, detail=f"No se extrajeron artículos de la ley {numero_ley} (ID Norma: {id_norma}).")
+    
+    articulos_a_devolver = []
+    nota_truncamiento_lista_resp = None
+    total_articulos_originales_resp = len(articulos_data_original)
+
     if articulo:
         articulo_buscado_norm = normalizar_numero_articulo_para_comparacion(articulo)
         if articulo_buscado_norm == "s/n_error_normalizacion" or not articulo_buscado_norm or articulo_buscado_norm == "s/n":
             raise HTTPException(status_code=400, detail=f"No se pudo normalizar el artículo buscado: '{articulo}'.")
         
         articulo_encontrado_obj: Optional[Articulo] = None
-        for art_obj in articulos_data: 
+        for art_obj in articulos_data_original: 
             if art_obj.articulo_id_interno == articulo_buscado_norm:
                 articulo_encontrado_obj = art_obj
                 break
@@ -318,25 +326,32 @@ async def consultar_ley(
                 termino_busqueda_texto = re.escape(articulo_buscado_norm.replace("t",""))
                 patron_texto = re.compile(r"\b(?:art(?:ículo|iculo)?s?\.?|art\.?|disposición|disp\.?)\s+(?:transitorio|trans\.?\s*)?" + termino_busqueda_texto + r"(?:[\sº°ªÞ,\.;:\(\)]|\b|$)", re.IGNORECASE)
             except re.error as e: raise HTTPException(status_code=500, detail="Error interno en búsqueda textual.")
-            for art_obj in articulos_data:
+            for art_obj in articulos_data_original:
                 if patron_texto.search(art_obj.texto):
                     art_obj.nota_busqueda = f"Encontrado por mención de '{articulo}' (normalizado a '{articulo_buscado_norm}') en texto."
                     articulo_encontrado_obj = art_obj
                     break 
-
         if articulo_encontrado_obj:
-            return LeyDetalle(
-                ley=numero_ley, 
-                id_norma=id_norma, 
-                articulos_totales=1, 
-                articulos=[articulo_encontrado_obj] 
-            )
+            articulos_a_devolver = [articulo_encontrado_obj]
         else: 
-            ids_internos = [a.articulo_id_interno for a in articulos_data]; displays = [a.articulo_display for a in articulos_data]
+            ids_internos = [a.articulo_id_interno for a in articulos_data_original]; displays = [a.articulo_display for a in articulos_data_original]
             raise HTTPException(status_code=404, detail={"error": f"Artículo '{articulo}' (buscado como '{articulo_buscado_norm}') no encontrado.", "sugerencia": "Verifique número.", "ids_disponibles": ids_internos[:10], "displays_disponibles": displays[:10]})
+    else: # Devolver todos los artículos, pero truncar la lista si es muy larga
+        if len(articulos_data_original) > MAX_ARTICULOS_RETURNED:
+            logger.info(f"Ley {numero_ley} tiene {len(articulos_data_original)} artículos. Devolviendo los primeros {MAX_ARTICULOS_RETURNED}.")
+            articulos_a_devolver = articulos_data_original[:MAX_ARTICULOS_RETURNED]
+            nota_truncamiento_lista_resp = TRUNCATION_MESSAGE_LIST.replace(str(MAX_ARTICULOS_RETURNED), str(len(articulos_a_devolver))) # Asegurar que el número en el mensaje sea el correcto
+        else:
+            articulos_a_devolver = articulos_data_original
     
-    return LeyDetalle(ley=numero_ley, id_norma=id_norma, articulos_totales=len(articulos_data), articulos=articulos_data)
-
+    return LeyDetalle(
+        ley=numero_ley, 
+        id_norma=id_norma, 
+        articulos_totales_en_respuesta=len(articulos_a_devolver), 
+        articulos=articulos_a_devolver,
+        total_articulos_originales_en_ley=total_articulos_originales_resp if nota_truncamiento_lista_resp else None,
+        nota_truncamiento_lista=nota_truncamiento_lista_resp
+    )
 
 @app.get("/ley_html", response_model=ArticuloHTML, summary="Consultar Artículo por idNorma e idParte (HTML)")
 async def consultar_articulo_html(
@@ -367,10 +382,9 @@ async def consultar_articulo_html(
         texto_extraido = div_contenido.get_text(separator="\n", strip=True)
         texto_limpio_final = limpiar_texto_articulo(texto_extraido)
 
-        if len(texto_limpio_final) > MAX_TEXT_LENGTH: # Usar MAX_TEXT_LENGTH también aquí
+        if len(texto_limpio_final) > MAX_TEXT_LENGTH: 
             logger.warning(f"Texto HTML para idNorma {idNorma}, idParte {idParte} truncado. Longitud original: {len(texto_limpio_final)}")
-            # Truncar asegurando que no se corte a mitad de una palabra
-            texto_limpio_final = texto_limpio_final[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE
+            texto_limpio_final = texto_limpio_final[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE_TEXT
         
         return ArticuloHTML(idNorma=idNorma, idParte=idParte, url_fuente=url, selector_usado=selector_usado, texto_html_extraido=texto_limpio_final)
     except Exception as e: raise HTTPException(status_code=500, detail=f"Error al procesar HTML para idParte '{idParte}': {e}")
