@@ -182,7 +182,7 @@ def obtener_xml_ley(id_norma: str) -> Optional[bytes]:
         response = requests.get(url, timeout=15, headers=headers)
         response.raise_for_status()
         logger.debug(f"XML de ley obtenido para IDNorma {id_norma}. Content-Type: {response.headers.get('Content-Type')}. Tamaño: {len(response.content)} bytes.")
-        if response.content: # Loggear el inicio del XML para inspección
+        if response.content: 
             logger.debug(f"Inicio del XML de la ley (primeros 1000 caracteres):\n{response.content[:1000].decode('utf-8', 'ignore')}")
         return response.content
     except requests.exceptions.Timeout:
@@ -197,102 +197,106 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Dict[str, Any]]:
         logger.warning("No hay datos XML para extraer artículos (xml_data es None).")
         return []
     try:
-        # Usar lxml-xml para un parseo más robusto de XML.
-        # lxml maneja mejor los encodings declarados en el prólogo XML.
         soup = BeautifulSoup(xml_data, "lxml-xml") 
     except Exception as e: 
         logger.exception(f"Error al parsear XML de la ley con BeautifulSoup (lxml-xml).")
-        # Podríamos intentar con el parser 'xml' como fallback si lxml falla, pero es menos común.
-        # try:
-        #     logger.warning("Intentando parsear con 'xml' como fallback.")
-        #     soup = BeautifulSoup(xml_data, "xml", from_encoding="utf-8")
-        # except Exception as e2:
-        #     logger.exception(f"Error al parsear XML de la ley con BeautifulSoup (parser 'xml' fallback): {e2}")
-        #     return []
-        return [] # Si el parseo inicial falla, retornar lista vacía.
+        return []
         
     resultado = []
     
-    # Intentar con 'Articulo' (sensible a mayúsculas) primero, que es lo más común.
-    articulos_tags = soup.find_all("Articulo")
-    if not articulos_tags:
-        logger.warning("No se encontraron etiquetas <Articulo> (sensible a mayúsculas). Intentando con expresión regular insensible...")
-        # Si no se encuentra, probar con regex insensible a mayúsculas/minúsculas.
-        articulos_tags = soup.find_all(re.compile(r'^Articulo$', re.IGNORECASE))
-        if articulos_tags:
-            logger.info(f"Se encontraron {len(articulos_tags)} etiquetas <Articulo> (o similar) usando regex insensible.")
-        else:
-            logger.warning("No se encontraron etiquetas <Articulo> (o similar) incluso con regex insensible.")
-            # Loggear una porción mayor del XML si no se encuentran artículos
-            logger.debug(f"XML completo (o primeros 5000b) donde no se encontraron artículos:\n{xml_data[:5000].decode('utf-8', 'ignore')}")
-            return [] # Si no hay etiquetas de artículo, no hay nada que procesar.
-    else:
-        logger.info(f"Se encontraron {len(articulos_tags)} etiquetas <Articulo> (sensible a mayúsculas) en el XML.")
+    # Buscar todas las etiquetas <EstructuraFuncional>
+    # El atributo tipoParte="Artículo" (o con tilde) identificará los artículos.
+    estructuras_funcionales_tags = soup.find_all("EstructuraFuncional")
+    logger.info(f"Se encontraron {len(estructuras_funcionales_tags)} etiquetas <EstructuraFuncional> en el XML.")
 
-    # Loggear las primeras N etiquetas <Articulo> para inspección
-    for i_debug, art_tag_debug in enumerate(articulos_tags[:3]): # Loggear las primeras 3
-        logger.debug(f"Contenido de la etiqueta <Articulo> XML #{i_debug+1} (primeros 500 chars):\n{str(art_tag_debug)[:500]}")
+    if not estructuras_funcionales_tags:
+        logger.warning("No se encontraron etiquetas <EstructuraFuncional>. No se pueden extraer artículos.")
+        logger.debug(f"XML completo (o primeros 5000b) donde no se encontraron EstructuraFuncional:\n{xml_data[:5000].decode('utf-8', 'ignore')}")
+        return []
 
+    # Loggear las primeras N etiquetas <EstructuraFuncional> para inspección
+    for i_debug, ef_tag_debug in enumerate(estructuras_funcionales_tags[:3]): # Loggear las primeras 3
+        logger.debug(f"Contenido de la etiqueta <EstructuraFuncional> XML #{i_debug+1} (primeros 500 chars):\n{str(ef_tag_debug)[:500]}")
 
-    for i, art_tag in enumerate(articulos_tags):
-        id_parte_articulo = art_tag.get('idParte', 'N/A') # Obtener idParte del tag Articulo
-        numero_tag = art_tag.find("Numero") # Buscar <Numero> dentro de <Articulo>
-        numero_display = numero_tag.text.strip() if numero_tag and numero_tag.text else "S/N"
-        numero_id_interno = normalizar_numero_articulo_para_comparacion(numero_display)
+    for i, ef_tag in enumerate(estructuras_funcionales_tags):
+        tipo_parte = ef_tag.get('tipoParte', '').lower()
+        id_parte_xml = ef_tag.get('idParte', 'N/A')
+
+        # Solo procesar si es un artículo (ser flexible con la tilde en "Artículo")
+        if "artículo" not in tipo_parte and "articulo" not in tipo_parte:
+            logger.debug(f"Omitiendo EstructuraFuncional XML #{i+1} (idParte: {id_parte_xml}) porque tipoParte='{ef_tag.get('tipoParte', '')}' no es 'Artículo'.")
+            continue
+
+        logger.debug(f"Procesando EstructuraFuncional XML #{i+1} (idParte: {id_parte_xml}, tipoParte='{ef_tag.get('tipoParte', '')}') como un Artículo.")
+
+        texto_tag = ef_tag.find("Texto") # Buscar la etiqueta <Texto> hija de esta <EstructuraFuncional>
+        if not texto_tag or not texto_tag.text or not texto_tag.text.strip():
+            logger.warning(f"EstructuraFuncional tipo Artículo XML #{i+1} (idParte: {id_parte_xml}) no tiene etiqueta <Texto> o está vacía. Se omite.")
+            continue
         
-        logger.debug(f"Procesando Artículo XML #{i+1} (idParte: {id_parte_articulo}): Display='{numero_display}', IDInterno='{numero_id_interno}'")
+        texto_completo_articulo = texto_tag.text.strip()
+        logger.debug(f"Texto completo extraído de <Texto> para EF #{i+1} (idParte: {id_parte_xml}): '{texto_completo_articulo[:200]}...'")
+
+        # Extraer el número del artículo y el texto neto del artículo
+        # Patrón para capturar el encabezado del artículo (ej. "Artículo 1.- ", "Art. 15 ", "Primero Transitorio.- ")
+        # Grupo 1: Todo el encabezado del número (ej. "Artículo 1", "Art. 15", "Primero Transitorio")
+        # Grupo 2: El delimitador opcional (ej. ".-", ". ", "- ")
+        # Grupo 3: El resto del texto
+        match_numero_en_texto = re.match(r"^\s*((?:art(?:ículo|iculo)?s?\.?\s*)?[\w\d\s]+(?:bis|ter|quater)?)\s*([\.\-\–\—:]\s*)?(.*)", texto_completo_articulo, re.IGNORECASE | re.DOTALL)
+        
+        numero_display_extraido = "S/N"
+        texto_neto_articulo = texto_completo_articulo # Por defecto, si no se puede separar
+
+        if match_numero_en_texto:
+            numero_display_extraido = match_numero_en_texto.group(1).strip()
+            # Si el grupo 3 (resto del texto) existe y no está vacío, ese es el texto neto.
+            if match_numero_en_texto.group(3) and match_numero_en_texto.group(3).strip():
+                 texto_neto_articulo = match_numero_en_texto.group(3).strip()
+            # Si no hay grupo 3, o está vacío, pero el grupo 1 (número) es diferente del texto completo,
+            # significa que el texto completo podría ser solo el "número" (ej. "Artículo Final")
+            elif numero_display_extraido != texto_completo_articulo:
+                 texto_neto_articulo = "" # No hay texto después del número.
+            # else: el texto completo es el número, texto_neto_articulo ya es texto_completo_articulo
+            
+            logger.debug(f"EF #{i+1}: NumeroDisplay extraído del texto: '{numero_display_extraido}', Texto neto (inicio): '{texto_neto_articulo[:100]}...'")
+        else:
+            logger.warning(f"EF #{i+1}: No se pudo extraer un número de artículo del inicio del texto: '{texto_completo_articulo[:100]}...'. Se usará 'S/N' para el display y se intentará normalizar el texto completo.")
+            # Intentar normalizar todo el texto si no se pudo separar el número.
+            numero_display_extraido = texto_completo_articulo # Para que la normalización intente con todo el texto.
+
+        numero_id_interno = normalizar_numero_articulo_para_comparacion(numero_display_extraido)
 
         if numero_id_interno == "s/n_error_normalizacion" or not numero_id_interno :
-            logger.warning(f"Artículo XML #{i+1} (Display='{numero_display}', idParte: {id_parte_articulo}): Normalización fallida. Se omite.")
+            logger.warning(f"EF Artículo XML #{i+1} (Display extraído='{numero_display_extraido}', idParte: {id_parte_xml}): Normalización fallida. Se omite.")
             continue
-        if numero_id_interno == "s/n" and numero_display != "S/N": 
-             logger.warning(f"Artículo XML #{i+1} (Display='{numero_display}', idParte: {id_parte_articulo}): Normalización resultó en 's/n'. Revisar.")
+        if numero_id_interno == "s/n" and numero_display_extraido != "S/N":
+             logger.warning(f"EF Artículo XML #{i+1} (Display extraído='{numero_display_extraido}', idParte: {id_parte_xml}): Normalización resultó en 's/n'. Revisar.")
+        
+        # Si después de extraer el número, el texto_neto_articulo quedó vacío, 
+        # y el numero_display_extraido es igual al texto_completo_articulo,
+        # significa que el "artículo" era solo su título/número (ej. "ARTICULO FINAL"). En este caso, el texto es el mismo display.
+        if not texto_neto_articulo.strip() and numero_display_extraido == texto_completo_articulo:
+            texto_neto_articulo = numero_display_extraido
+            logger.debug(f"EF #{i+1}: El texto neto estaba vacío y el display era el texto completo. Usando display como texto: '{texto_neto_articulo[:100]}...'")
 
-        texto_articulo = None
-        campo_texto_usado = "Ninguno"
-        campos_posibles_texto = ["Texto", "TextoArticulo", "Cuerpo", "Contenido", "Text"] 
-        for campo_nombre in campos_posibles_texto:
-            tag_texto = art_tag.find(campo_nombre) 
-            if tag_texto and tag_texto.text and tag_texto.text.strip():
-                texto_articulo = tag_texto.text.strip()
-                campo_texto_usado = campo_nombre
-                break
-        
-        if not texto_articulo: 
-            texto_bruto_articulo = art_tag.get_text(separator=" ", strip=True)
-            campo_texto_usado = "get_text() fallback"
-            if numero_display != "S/N": 
-                patron_inicio_articulo = r"^(?:\s*" + re.escape(numero_display) + r"\s*(?:[\.\-\–\—:]|\s*[º°ª])?\s*)?"
-                texto_limpio_temp = re.sub(patron_inicio_articulo, '', texto_bruto_articulo, count=1, flags=re.IGNORECASE).strip()
-                if texto_limpio_temp and len(texto_limpio_temp) < len(texto_bruto_articulo) : 
-                    texto_articulo = texto_limpio_temp
-                    campo_texto_usado += " (con limpieza de prefijo)"
-                else: 
-                    texto_articulo = texto_bruto_articulo
-            else:
-                 texto_articulo = texto_bruto_articulo
-            
-            if not texto_articulo: 
-                logger.warning(f"Artículo XML #{i+1} (Display='{numero_display}', idParte: {id_parte_articulo}): No tiene contenido textual identificable. Se omite.")
-                continue 
-        
-        logger.debug(f"Artículo XML #{i+1} (Display='{numero_display}', idParte: {id_parte_articulo}): Texto extraído usando '{campo_texto_usado}'. Longitud: {len(texto_articulo)} chars.")
+
+        logger.debug(f"EF Artículo XML #{i+1} (Display extraído='{numero_display_extraido}', idParte: {id_parte_xml}): IDInterno='{numero_id_interno}'. Texto final para el artículo (inicio): '{texto_neto_articulo[:100]}...'")
 
         patron_referencias = r"(?:Ley|Decreto\s+(?:con\s+Fuerza\s+de\s+Ley|Ley|Supremo)|D\.F\.L\.?|D\.L\.?|L\.?)\s*(?:N(?:[°ºªo]|\.?)|\bnúmeros?\b)?\s*([\w\d\.-]+(?:/\d{2,4})?)"
-        referencias_encontradas_tuplas = re.findall(patron_referencias, texto_articulo, re.IGNORECASE)
+        referencias_encontradas_tuplas = re.findall(patron_referencias, texto_neto_articulo, re.IGNORECASE) # Buscar referencias en el texto neto
         referencias_limpias = list(set(ref.strip(" .-") for ref in referencias_encontradas_tuplas if ref.strip(" .-")))
 
         resultado.append({
-            "articulo_display": numero_display,
+            "articulo_display": numero_display_extraido.strip(), # El número/título extraído del texto
             "articulo_id_interno": numero_id_interno,
-            "texto": texto_articulo,
+            "texto": texto_neto_articulo.strip(), # El cuerpo del artículo
             "referencias_legales": referencias_limpias,
-            "id_parte_xml": id_parte_articulo 
+            "id_parte_xml": id_parte_xml 
         })
     
     logger.info(f"Extracción finalizada. {len(resultado)} artículos procesados y añadidos.")
-    if not resultado and xml_data and len(articulos_tags) > 0 :
-        logger.warning("Se encontraron etiquetas <Articulo> pero no se extrajo ningún artículo válido. Revisar lógica de normalización o extracción de texto.")
+    if not resultado and xml_data and len(estructuras_funcionales_tags) > 0 :
+        logger.warning("Se encontraron etiquetas <EstructuraFuncional> pero no se extrajo ningún artículo válido. Revisar lógica de normalización o extracción de texto.")
     return resultado
 
 @app.get("/ley")
@@ -342,7 +346,7 @@ def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
             return {"error": f"Error interno al procesar la búsqueda del artículo '{articulo}'."}
         articulos_coincidentes_texto = []
         for art_obj in articulos_data:
-            if patron_texto.search(art_obj["texto"]):
+            if patron_texto.search(art_obj["texto"]): # Buscar en el texto neto del artículo
                 logger.debug(f"Coincidencia textual encontrada para '{articulo_buscado_norm}' en artículo display '{art_obj['articulo_display']}' (ID interno '{art_obj['articulo_id_interno']}')")
                 art_obj_copia = art_obj.copy() 
                 art_obj_copia["nota_busqueda"] = f"Artículo encontrado por mención de '{articulo}' (normalizado a '{articulo_buscado_norm}') en su texto. El número formal del artículo es '{art_obj['articulo_display']}'."
