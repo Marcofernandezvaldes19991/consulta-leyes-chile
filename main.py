@@ -12,10 +12,9 @@ with open("fallbacks.json", "r", encoding="utf-8") as f:
     fallback_ids = json.load(f)
 
 def obtener_id_norma(numero_ley):
-    numero_ley = str(numero_ley)  # <-- Asegura que sea string
-
-    # Fallback manual
+    numero_ley = str(numero_ley)  # Forzar tipo string
     if numero_ley in fallback_ids:
+        print(f"ID obtenido desde fallback: {numero_ley} -> {fallback_ids[numero_ley]}")
         return fallback_ids[numero_ley]
 
     url = f"https://www.leychile.cl/Consulta/indice_normas_busqueda_simple?formato=xml&modo=1&busqueda=ley+{numero_ley}"
@@ -43,15 +42,18 @@ def extraer_articulos(xml_data):
     soup = BeautifulSoup(xml_data, "xml")
     articulos = soup.find_all("Articulo")
     resultado = []
+    print("Artículos detectados:")
     for art in articulos:
-        numero = art.find("Numero").text if art.find("Numero") else "S/N"
+        numero_tag = art.find("Numero")
+        numero = numero_tag.text.strip() if numero_tag else art.get("id", "S/N")
         texto = art.find("Texto").text if art.find("Texto") else ""
-        referencias = re.findall(r"Ley N[°º]\\s*\\d{4,7}", texto)
+        referencias = re.findall(r"Ley N[°º]?\s*\d{4,7}", texto)
         resultado.append({
             "articulo": numero,
             "texto": texto.strip(),
             "referencias_legales": list(set(referencias))
         })
+        print(f"- Artículo {numero}")
     return resultado
 
 @app.get("/ley")
@@ -67,8 +69,9 @@ def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
     articulos = extraer_articulos(xml)
 
     if articulo:
+        articulo_normalizado = articulo.strip().lower()
         for art in articulos:
-            if art["articulo"] == articulo:
+            if art["articulo"].strip().lower() == articulo_normalizado:
                 return art
         return {"error": f"Artículo {articulo} no encontrado"}
     else:
