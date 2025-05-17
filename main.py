@@ -132,10 +132,10 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
             if letra_part in ["bis", "ter", "quater"] or (len(letra_part) == 1 and letra_part.isalpha()): componente += letra_part
         componentes_normalizados.append(componente)
         texto_restante = texto_restante.replace(num_part, "", 1).replace(letra_part, "", 1).strip()
-    logger.debug(f"Componentes normalizados de partes numéricas: {componentes_normalizados}, texto restante: '{texto_restante}'") # Esta era la línea 134 en v17
-    if not componentes_normalizados and texto_restante: # Esta era la línea 135
-        posible_romano = texto_restante.replace(" ", "") # Esta era la línea 136
-        if posible_romano in ROMAN_TO_INT: # Esta era la línea 137 donde el traceback indicaba el problema (estaba cortada en el despliegue)
+    logger.debug(f"Componentes normalizados de partes numéricas: {componentes_normalizados}, texto restante: '{texto_restante}'")
+    if not componentes_normalizados and texto_restante: 
+        posible_romano = texto_restante.replace(" ", "") 
+        if posible_romano in ROMAN_TO_INT: 
             componentes_normalizados.append(str(ROMAN_TO_INT[posible_romano]))
             logger.debug(f"Componente romano añadido: '{str(ROMAN_TO_INT[posible_romano])}' desde '{posible_romano}'")
             texto_restante = ""
