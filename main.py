@@ -85,12 +85,17 @@ def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
         # Normalización de número
         articulo_normalizado = str(int(articulo)).strip()
 
+        import re
+        patron = re.compile(rf"\\b(art(í)?culo|art\\.?)[\\s\\xa0]*{articulo_normalizado}\\b", re.IGNORECASE)
+
         for art in articulos:
+            # Coincidencia exacta en el campo "articulo"
             if art["articulo"].strip() == articulo_normalizado:
                 return art
-            if f"Artículo {articulo_normalizado}" in art["texto"]:
-                return art
-            if f"Art. {articulo_normalizado}" in art["texto"]:
+
+            # Búsqueda por coincidencia textual dentro del contenido del artículo
+            if patron.search(art["texto"]):
+                art["nota"] = "Artículo encontrado por coincidencia textual en el contenido"
                 return art
 
         return {
