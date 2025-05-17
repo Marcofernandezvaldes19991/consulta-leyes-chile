@@ -1,0 +1,60 @@
+from fastapi import FastAPI, Query
+from typing import Optional
+import requests
+from bs4 import BeautifulSoup
+import re
+
+app = FastAPI()
+
+def obtener_xml_ley(id_norma):
+    url = f"https://www.leychile.cl/Consulta/obtxml?opt=7&idNorma={id_norma}&notaPIE=1"
+    response = requests.get(url)
+    if response.status_code != 200:
+        return None
+    return response.content
+
+def extraer_articulos(xml_data):
+    soup = BeautifulSoup(xml_data, "xml")
+    articulos = soup.find_all("Articulo")
+    resultado = []
+    for art in articulos:
+        numero = art.find("Numero").text if art.find("Numero") else "S/N"
+        texto = art.find("Texto").text if art.find("Texto") else ""
+        referencias = re.findall(r"Ley N[°º]\\s*\\d{4,7}", texto)
+        resultado.append({
+            "articulo": numero,
+            "texto": texto.strip(),
+            "referencias_legales": list(set(referencias))
+        })
+    return resultado
+
+def obtener_id_norma(numero_ley):
+    url = f"https://www.leychile.cl/Consulta/indice_normas_busqueda_simple?formato=xml&modo=1&busqueda=ley+{numero_ley}"
+    response = requests.get(url)
+    if response.status_code != 200:
+        return None
+    soup = BeautifulSoup(response.content, "xml")
+    norma = soup.find("Norma")
+    if norma and norma.find("IdNorma"):
+        return norma.find("IdNorma").text
+    return None
+
+@app.get("/ley")
+def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
+    id_norma = obtener_id_norma(numero_ley)
+    if not id_norma:
+        return {"error": f"No se encontró la ley {numero_ley}"}
+
+    xml = obtener_xml_ley(id_norma)
+    if not xml:
+        return {"error": f"No se pudo obtener la ley {numero_ley}"}
+
+    articulos = extraer_articulos(xml)
+
+    if articulo:
+        for art in articulos:
+            if art["articulo"] == articulo:
+                return art
+        return {"error": f"Artículo {articulo} no encontrado"}
+    else:
+        return {"articulos": articulos}
