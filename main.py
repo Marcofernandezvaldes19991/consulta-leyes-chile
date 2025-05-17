@@ -105,3 +105,22 @@ def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
 
     return {"articulos": articulos}
 
+@app.get("/ley_html")
+def consultar_articulo_html(idNorma: str, idParte: str):
+    url = f"https://www.bcn.cl/leychile/navegar?idNorma={idNorma}&idParte={idParte}"
+    response = requests.get(url)
+    if response.status_code != 200:
+        return {"error": f"No se pudo obtener el contenido para idParte {idParte}"}
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    div_contenido = soup.find("div", {"id": f"p{idParte}"})
+    if not div_contenido:
+        return {"error": f"No se encontró contenido para idParte {idParte}"}
+
+    texto = div_contenido.get_text(separator="\n").strip()
+    return {
+        "idNorma": idNorma,
+        "idParte": idParte,
+        "texto": texto
+    }
+
