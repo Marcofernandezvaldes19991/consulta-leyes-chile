@@ -5,8 +5,14 @@ from bs4 import BeautifulSoup
 import re
 import json
 import os
+import logging
+import time
 
 app = FastAPI()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Cargar fallback de ID de normas
 try:
@@ -14,16 +20,16 @@ try:
     fallback_path = os.path.join(current_dir, "fallbacks.json")
     with open(fallback_path, "r", encoding="utf-8") as f:
         fallback_ids = json.load(f)
-    print(f"IDs de fallback cargados exitosamente desde: {fallback_path}")
+    logger.info(f"IDs de fallback cargados exitosamente desde: {fallback_path}")
 except FileNotFoundError:
     fallback_ids = {}
-    print(f"ADVERTENCIA: Archivo 'fallbacks.json' no encontrado en {fallback_path}. El fallback de IDs no estará disponible.")
+    logger.warning(f"Archivo 'fallbacks.json' no encontrado en {fallback_path}. El fallback de IDs no estará disponible.")
 except json.JSONDecodeError:
     fallback_ids = {}
-    print(f"ADVERTENCIA: Error al decodificar 'fallbacks.json'. El fallback de IDs no estará disponible.")
+    logger.warning(f"Error al decodificar 'fallbacks.json'. El fallback de IDs no estará disponible.")
 except Exception as e:
     fallback_ids = {}
-    print(f"ADVERTENCIA: Ocurrió un error inesperado al cargar 'fallbacks.json': {e}")
+    logger.exception(f"Ocurrió un error inesperado al cargar 'fallbacks.json': {e}")
 
 # Diccionarios para ayudar en la normalización de números de artículo
 ROMAN_TO_INT = {
@@ -59,10 +65,10 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
         return str(ROMAN_TO_INT[s])
 
     # Quitar prefijos como "artículo", "art.", "nro.", "disposición", etc.
-    s = re.sub(r'^(artículo|articulo|art\.?|nro\.?|nº|n°|disposición|disp\.?)\s*', '', s, flags=re.IGNORECASE)
+    s = re.sub(r"^(artículo|articulo|art\.?|nro\.?|n[º°]|disposición|disp\.?)\s*", "", s, flags=re.IGNORECASE)
     
     # Manejar "transitorio"
-    transitorio_match = re.match(r'^(transitorio|trans\.?|t)\s*(.*)', s, flags=re.IGNORECASE)
+    transitorio_match = re.match(r"^(transitorio|trans\.?|t)\s*(.*)", s, flags=re.IGNORECASE)
     prefijo_transitorio = ""
     if transitorio_match:
         prefijo_transitorio = "t"
@@ -72,13 +78,13 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
     # Esta parte puede volverse compleja y necesitar un parser más sofisticado para casos combinados.
     # Por ahora, se prioriza la extracción de números directos.
     for palabra, digito in WORDS_TO_INT.items():
-        if palabra in s: # Solo si la palabra completa está
+        if re.search(r'\b' + re.escape(palabra) + r'\b', s): # Solo si la palabra completa está
              # Cuidado con reemplazos parciales, ej. "decimo" en "decimoprimero"
              # Usar \b para asegurar palabra completa si se reemplaza
-             s = re.sub(r'\b' + palabra + r'\b', digito, s)
+             s = re.sub(r'\b' + re.escape(palabra) + r'\b', digito, s)
 
     # Quitar ordinales (º, °, ª), puntos, comas.
-    s = re.sub(r'[º°ª\.,]', '', s)
+    s = re.sub(r"[º°ª\.,]", "", s)
 
     # Extraer números y letras (para "bis", "a", "b", etc.)
     # Este regex busca un número, opcionalmente seguido de letras (bis, ter, a, b)
@@ -86,7 +92,7 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
     # También maneja números romanos que no fueron capturados antes (ej. "XV A")
     
     # Primero, intentar identificar números arábigos y letras adjuntas
-    partes_numericas = re.findall(r'(\d+)\s*([a-zA-Z]*)', s)
+    partes_numericas = re.findall(r"(\d+)\s*([a-zA-Z]*)", s)
     
     componentes_normalizados = []
     texto_restante = s
@@ -131,7 +137,7 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
         # Como último recurso, tomar todo el string original, quitar espacios y caracteres no alfanuméricos
         # excepto los que podrían ser parte de un identificador (ej. "bis").
         # Esto es muy genérico.
-        s_limpio = re.sub(r'[^a-z0-9]', '', s.replace(" ", "")).strip()
+        s_limpio = re.sub(r"[^a-z0-9]", "", s.replace(" ", "")).strip()
         if not s_limpio: # Si después de limpiar no queda nada
             return "s/n_error_normalizacion"
         id_final = s_limpio
@@ -146,30 +152,45 @@ def obtener_id_norma(numero_ley: str) -> Optional[str]:
     """
     norm_numero_ley_buscado = numero_ley.strip().replace(".", "").replace(",", "") 
     if not norm_numero_ley_buscado.isdigit():
-        print(f"Advertencia: El número de ley '{numero_ley}' (normalizado a '{norm_numero_ley_buscado}') no parece ser un número válido.")
+        logger.warning(f"El número de ley '{numero_ley}' (normalizado a '{norm_numero_ley_buscado}') no parece ser un número válido.")
+        # Consider raising an exception here if appropriate
+        # raise ValueError(f"Invalid law number: {numero_ley}")
 
     if norm_numero_ley_buscado in fallback_ids:
-        print(f"Usando ID de fallback para ley '{norm_numero_ley_buscado}': {fallback_ids[norm_numero_ley_buscado]}")
+        logger.info(f"Usando ID de fallback para ley '{norm_numero_ley_buscado}': {fallback_ids[norm_numero_ley_buscado]}")
         return fallback_ids[norm_numero_ley_buscado]
 
     url = f"https://www.leychile.cl/Consulta/indice_normas_busqueda_simple?formato=xml&modo=1&busqueda=ley+{norm_numero_ley_buscado}"
-    print(f"Consultando URL para ID de norma: {url}")
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, timeout=10, headers=headers)
-        response.raise_for_status()
-    except requests.exceptions.Timeout:
-        print(f"Timeout al buscar ID para ley {norm_numero_ley_buscado}")
+    logger.info(f"Consultando URL para ID de norma: {url}")
+    
+    # Retry logic with exponential backoff
+    max_retries = 3
+    retry_delay = 1  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'} # Updated User-Agent
+            response = requests.get(url, timeout=10, headers=headers)
+            response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            break  # If successful, break out of the retry loop
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout al buscar ID para ley {norm_numero_ley_buscado} (Attempt {attempt + 1}/{max_retries})")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error en petición HTTP para ID de norma {norm_numero_ley_buscado} (Attempt {attempt + 1}/{max_retries}): {e}")
+        
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
+            retry_delay *= 2  # Exponential backoff
+    else:
+        logger.error(f"Failed to obtain ID for ley {norm_numero_ley_buscado} after {max_retries} attempts.")
         return None
-    except requests.exceptions.RequestException as e:
-        print(f"Error en petición HTTP para ID de norma {norm_numero_ley_buscado}: {e}")
-        return None
+    
 
     try:
         soup = BeautifulSoup(response.content, "xml")
         normas = soup.find_all("Norma")
         if not normas:
-            print(f"No se encontraron etiquetas <Norma> para ley {norm_numero_ley_buscado}. XML: {response.content.decode('utf-8', 'ignore')[:500]}")
+            logger.warning(f"No se encontraron etiquetas <Norma> para ley {norm_numero_ley_buscado}. XML: {response.content.decode('utf-8', 'ignore')[:500]}")
             return None
 
         for norma in normas:
@@ -182,44 +203,44 @@ def obtener_id_norma(numero_ley: str) -> Optional[str]:
                         id_encontrado = id_norma_tag.text.strip()
                         titulo_tag_debug = norma.find("Titulo")
                         titulo_debug_text = titulo_tag_debug.text.strip() if titulo_tag_debug and titulo_tag_debug.text else "N/A"
-                        print(f"ID encontrado para ley '{norm_numero_ley_buscado}' (N° XML: '{numero_norma_en_xml}'): {id_encontrado}. Título: '{titulo_debug_text}'")
+                        logger.info(f"ID encontrado para ley '{norm_numero_ley_buscado}' (N° XML: '{numero_norma_en_xml}'): {id_encontrado}. Título: '{titulo_debug_text}'")
                         return id_encontrado
                     else:
-                        print(f"Coincidencia de número de ley '{numero_norma_en_xml}' para '{norm_numero_ley_buscado}', pero no se encontró IdNorma.")
+                        logger.warning(f"Coincidencia de número de ley '{numero_norma_en_xml}' para '{norm_numero_ley_buscado}', pero no se encontró IdNorma.")
         
-        print(f"No se encontró un ID de norma coincidente para la ley '{norm_numero_ley_buscado}' en {len(normas)} normas evaluadas (verificando etiqueta <Numero>).")
+        logger.warning(f"No se encontró un ID de norma coincidente para la ley '{norm_numero_ley_buscado}' en {len(normas)} normas evaluadas (verificando etiqueta <Numero>).\nXML: {response.content.decode('utf-8', 'ignore')[:500]}")
         return None
     except Exception as e:
-        print(f"Error al parsear XML para obtener ID de norma ({norm_numero_ley_buscado}): {e}")
+        logger.exception(f"Error al parsear XML para obtener ID de norma ({norm_numero_ley_buscado}): {e}")
         return None
 
 
 def obtener_xml_ley(id_norma: str) -> Optional[bytes]:
     """Obtiene el contenido XML de una ley dado su IdNorma."""
     url = f"https://www.leychile.cl/Consulta/obtxml?opt=7&idNorma={id_norma}&notaPIE=1"
-    print(f"Consultando XML de ley con IDNorma {id_norma} en URL: {url}")
+    logger.info(f"Consultando XML de ley con IDNorma {id_norma} en URL: {url}")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'} 
         response = requests.get(url, timeout=15, headers=headers)
         response.raise_for_status()
         return response.content
     except requests.exceptions.Timeout:
-        print(f"Timeout al obtener XML para IDNorma {id_norma}")
+        logger.warning(f"Timeout al obtener XML para IDNorma {id_norma}")
         return None
     except requests.exceptions.RequestException as e:
-        print(f"Error en petición HTTP para XML de ley (IDNorma {id_norma}): {e}")
+        logger.error(f"Error en petición HTTP para XML de ley (IDNorma {id_norma}): {e}")
         return None
 
 
 def extraer_articulos(xml_data: Optional[bytes]) -> List[Dict[str, Any]]:
     """Extrae los artículos y sus detalles desde el contenido XML de una ley."""
     if not xml_data:
-        print("No hay datos XML para extraer artículos.")
+        logger.warning("No hay datos XML para extraer artículos.")
         return []
     try:
-        soup = BeautifulSoup(xml_data, "xml") 
+        soup = BeautifulSoup(xml_data, "xml", from_encoding="utf-8") # Explicit encoding
     except Exception as e: 
-        print(f"Error al parsear XML de la ley con BeautifulSoup: {e}")
+        logger.exception(f"Error al parsear XML de la ley con BeautifulSoup: {e}")
         return []
         
     resultado = []
@@ -227,7 +248,7 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Dict[str, Any]]:
     articulos_tags = soup.find_all("Articulo")
 
     if not articulos_tags:
-        print("No se encontraron etiquetas <Articulo> en el XML.")
+        logger.warning("No se encontraron etiquetas <Articulo> en el XML.")
         return []
 
     for art_tag in articulos_tags:
@@ -242,12 +263,12 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Dict[str, Any]]:
         numero_id_interno = normalizar_numero_articulo_para_comparacion(numero_display)
 
         # Si la normalización falla o da un ID no útil, podríamos optar por omitir el artículo
-        # o usar el display_num como ID interno si es suficientemente simple.
+        # o usar el display_num como ID interno si es suficientemente simple.\
         if numero_id_interno == "s/n_error_normalizacion" or not numero_id_interno :
-            print(f"Advertencia: No se pudo normalizar satisfactoriamente el número de artículo '{numero_display}'. Se omite este artículo.")
+            logger.warning(f"No se pudo normalizar satisfactoriamente el número de artículo '{numero_display}'. Se omite este artículo.")
             continue
         if numero_id_interno == "s/n" and numero_display != "S/N": # Si la normalización solo quitó prefijos pero no encontró número
-             print(f"Advertencia: Número de artículo '{numero_display}' resultó en 's/n' tras normalización. Revisar lógica.")
+             logger.warning(f"Número de artículo '{numero_display}' resultó en 's/n' tras normalización. Revisar lógica.")
              # Podríamos decidir usar una versión simplificada de numero_display aquí si es necesario.
 
         texto_articulo = None
@@ -264,7 +285,7 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Dict[str, Any]]:
             texto_bruto_articulo = art_tag.get_text(separator=" ", strip=True)
             
             # Intentar remover el número de artículo del inicio del texto si está presente,
-            # para evitar redundancia, ya que tenemos `numero_display`.
+            # para evitar redundancia, ya que tenemos `numero_display`.\
             # Esta lógica debe ser cuidadosa para no eliminar parte del texto real.
             # Se compara con numero_display que es el texto original del tag <Numero>.
             if numero_display != "S/N":
@@ -285,7 +306,7 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Dict[str, Any]]:
                 # print(f"Artículo '{numero_display}' (ID interno '{numero_id_interno}') no tiene contenido textual identificable.")
                 continue 
 
-        patron_referencias = r"(?:Ley|Decreto\s+(?:con\s+Fuerza\s+de\s+Ley|Ley|Supremo)|D\.F\.L\.?|D\.L\.?|L\.?)\s*(?:N(?:[°ºªo]|\.?)|\bnúmeros?\b)?\s*([\w\d\.-]+(?:/\d{2,4})?)"
+        patron_referencias = r"(?:Ley|Decreto\s+(?:con\s+Fuerza\s+de\s+Ley|Ley|Supremo)|D\.F\.L\.?|D\.L\.?|L\.?)\s*(?:N(?:[º°ªo]|\.?)|\bnúmeros?\b)?\s*([\w\d\.-]+(?:/\d{2,4})?)"
         referencias_encontradas_tuplas = re.findall(patron_referencias, texto_articulo, re.IGNORECASE)
         referencias_limpias = list(set(ref.strip(" .-") for ref in referencias_encontradas_tuplas if ref.strip(" .-")))
 
@@ -297,7 +318,7 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Dict[str, Any]]:
         })
     
     if not resultado and xml_data:
-        print("Se procesó el XML pero no se extrajo ningún artículo. Revisar estructura del XML y selectores.")
+        logger.warning("Se procesó el XML pero no se extrajo ningún artículo. Revisar estructura del XML y selectores.")
 
     return resultado
 
@@ -335,9 +356,9 @@ def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
             if len(articulos_encontrados_exactos) == 1:
                 return articulos_encontrados_exactos[0]
             else:
-                # Esto podría pasar si hay múltiples elementos con el mismo número normalizado (ej. Artículo 1 y Artículo 1 Transitorio si ambos normalizan a "1" y "t1" respectivamente y se busca "1")
+                # Esto podría pasar si hay múltiples elementos con el mismo número normalizado (ej. Artículo 1 y Artículo 1 Transitorio si ambos normalizan a "1" y "t1" respectivamente y se busca[...]
                 # O si hay duplicados por alguna razón en el XML.
-                print(f"Advertencia: Múltiples artículos ({len(articulos_encontrados_exactos)}) coinciden con el ID interno normalizado '{articulo_buscado_norm}'. Devolviendo el primero.")
+                logger.warning(f"Múltiples artículos ({len(articulos_encontrados_exactos)}) coinciden con el ID interno normalizado '{articulo_buscado_norm}'. Devolviendo el primero.")
                 return articulos_encontrados_exactos[0]
 
 
@@ -357,21 +378,21 @@ def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
                 re.IGNORECASE
             )
         except re.error as e:
-            print(f"Error al compilar regex para búsqueda textual de artículo '{articulo_buscado_norm}': {e}")
+            logger.exception(f"Error al compilar regex para búsqueda textual de artículo '{articulo_buscado_norm}': {e}")
             return {"error": f"Error interno al procesar la búsqueda del artículo '{articulo}'."}
 
         articulos_coincidentes_texto = []
         for art_obj in articulos_data:
             if patron_texto.search(art_obj["texto"]):
                 art_obj_copia = art_obj.copy() 
-                art_obj_copia["nota_busqueda"] = f"Artículo encontrado por mención de '{articulo}' (normalizado a '{articulo_buscado_norm}') en su texto. El número formal del artículo es '{art_obj['articulo_display']}' (ID interno: '{art_obj['articulo_id_interno']}')."
+                art_obj_copia["nota_busqueda"] = f"Artículo encontrado por mención de '{articulo}' (normalizado a '{articulo_buscado_norm}') en su texto. El número formal del artículo es '{art_obj['articulo_display']}'."
                 articulos_coincidentes_texto.append(art_obj_copia)
         
         if articulos_coincidentes_texto:
             if len(articulos_coincidentes_texto) == 1:
                  return articulos_coincidentes_texto[0]
             else:
-                print(f"Múltiples artículos ({len(articulos_coincidentes_texto)}) mencionan textualmente '{articulo}'. Devolviendo el primero.")
+                logger.warning(f"Múltiples artículos ({len(articulos_coincidentes_texto)}) mencionan textualmente '{articulo}'. Devolviendo el primero.")
                 return {
                     "advertencia": f"Se encontraron {len(articulos_coincidentes_texto)} artículos que mencionan textualmente '{articulo}'. Se devuelve el primero de ellos.",
                     "articulo_encontrado": articulos_coincidentes_texto[0],
@@ -381,7 +402,7 @@ def consultar_ley(numero_ley: str, articulo: Optional[str] = None):
         # Si no se encontró de ninguna forma.
         return {
             "error": f"Artículo '{articulo}' (buscado como '{articulo_buscado_norm}') no encontrado ni por ID exacto ni por mención textual en la ley {numero_ley}.",
-            "sugerencia": "Verifique el número del artículo. Pruebe formatos como '15', '15bis', 'Primero Transitorio', 'Final'. También puede intentar sin especificar un artículo para ver todos los disponibles.",
+            "sugerencia": "Verifique el número del artículo. Pruebe formatos como '15', '15bis', 'Primero Transitorio', 'Final'. También puede intentar sin especificar un artículo para ver todos los artículos disponibles.",
             "articulos_disponibles_ids_internos_muestra": [a["articulo_id_interno"] for a in articulos_data[:20]], 
             "articulos_disponibles_display_muestra": [a["articulo_display"] for a in articulos_data[:20]] 
         }
@@ -397,16 +418,18 @@ def consultar_articulo_html(idNorma: str, idParte: str):
     Este endpoint es inherentemente frágil debido a que depende de la estructura HTML de un sitio externo.
     """
     url = f"https://www.bcn.cl/leychile/navegar?idNorma={idNorma}&idParte={idParte}"
-    print(f"Consultando HTML desde: {url}")
+    logger.info(f"Consultando HTML desde: {url}")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, timeout=10, headers=headers)
         response.raise_for_status()
     except requests.exceptions.Timeout:
-        print(f"Timeout al obtener HTML para idNorma {idNorma}, idParte {idParte}")
-        return {"error": f"Timeout al obtener contenido de {url}"}
+        error_message = f"Timeout al obtener HTML para idNorma {idNorma}, idParte {idParte}"
+        logger.error(error_message)
+        return {"error": error_message}
     except requests.exceptions.RequestException as e:
-        print(f"Error en petición HTTP para HTML (idNorma {idNorma}, idParte {idParte}): {e}")
+        error_message = f"Error en petición HTTP para HTML (idNorma {idNorma}, idParte {idParte}): {e}"
+        logger.exception(error_message)
         return {"error": f"No se pudo obtener el contenido de {url}. Error: {e}"}
 
     try:
@@ -426,16 +449,17 @@ def consultar_articulo_html(idNorma: str, idParte: str):
             if div_temp:
                 div_contenido = div_temp
                 selector_usado = selector
-                print(f"Contenido encontrado para idParte '{idParte}' usando selector CSS '{selector}'")
+                logger.info(f"Contenido encontrado para idParte '{idParte}' usando selector CSS '{selector}'")
                 break
         
         if not div_contenido:
             div_contenido = soup.find("div", id=re.compile(f".*{re.escape(idParte)}.*", re.IGNORECASE))
             if div_contenido:
                 selector_usado = f"Fallback regex: div con id que contiene '{idParte}' (id real: {div_contenido.get('id')})"
-                print(f"Contenido encontrado para idParte '{idParte}' usando {selector_usado}")
+                logger.info(f"Contenido encontrado para idParte '{idParte}' usando {selector_usado}")
             else:
-                print(f"No se encontró contenido para idParte '{idParte}' en norma '{idNorma}' con los selectores probados.")
+                error_message = f"No se encontró contenido para idParte '{idParte}' en norma '{idNorma}' con los selectores probados."
+                logger.error(error_message)
                 return {"error": f"No se encontró el elemento de contenido específico para idParte '{idParte}' en la página de la norma '{idNorma}'."}
 
         texto_extraido = div_contenido.get_text(separator="\n", strip=True)
@@ -448,7 +472,8 @@ def consultar_articulo_html(idNorma: str, idParte: str):
             "texto_html_extraido": texto_extraido
         }
     except Exception as e:
-        print(f"Error al parsear HTML o extraer texto para idNorma {idNorma}, idParte {idParte}: {e}")
+        error_message = f"Error al parsear HTML o extraer texto para idNorma {idNorma}, idParte {idParte}: {e}"
+        logger.exception(error_message)
         return {"error": f"Error al procesar el contenido HTML para idParte '{idParte}'. Detalle: {e}"}
 
 # Ejemplo para ejecutar con Uvicorn (si este archivo se llama main.py):
@@ -462,4 +487,3 @@ def consultar_articulo_html(idNorma: str, idParte: str):
 # http://127.0.0.1:8000/ley?numero_ley=20370&articulo=3 bis (Artículo con "bis")
 # http://127.0.0.1:8000/ley?numero_ley=20370&articulo=Primero Transitorio
 # http://127.0.0.1:8000/ley?numero_ley=CC Chilena&articulo=1 (Constitución, requiere fallback o manejo especial de nombre)
-
