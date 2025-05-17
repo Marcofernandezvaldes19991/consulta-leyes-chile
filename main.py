@@ -45,7 +45,13 @@ def extraer_articulos(xml_data):
     print("Artículos detectados:")
     for art in articulos:
         numero_tag = art.find("Numero")
-        numero = numero_tag.text.strip() if numero_tag else art.get("id", "S/N")
+        if numero_tag:
+            numero_texto = numero_tag.text.strip().lower()
+            # Normaliza eliminando 'artículo', 'art.', etc.
+            numero = re.sub(r"art[íi]?culo\s*\.?:?\s*", "", numero_texto).strip()
+        else:
+            numero = art.get("id", "S/N").lower()
+
         texto = art.find("Texto").text if art.find("Texto") else ""
         referencias = re.findall(r"Ley N[°º]?\s*\d{4,7}", texto)
         resultado.append({
@@ -53,7 +59,7 @@ def extraer_articulos(xml_data):
             "texto": texto.strip(),
             "referencias_legales": list(set(referencias))
         })
-        print(f"- Artículo {numero}")
+        print(f"- Artículo detectado: {numero}")
     return resultado
 
 @app.get("/ley")
