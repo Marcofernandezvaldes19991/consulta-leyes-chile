@@ -13,9 +13,19 @@ from cachetools import TTLCache
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
     description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché y mejoras en la extracción de datos.",
-    version="1.2.0", 
+    version="1.2.0", # O la versión que estés usando actualmente
+    servers=[
+        {
+            "url": "https://consulta-leyes-chile.onrender.com", # ¡IMPORTANTE! Usa tu URL de Render correcta
+            "description": "Servidor de Producción en Render"
+        },
+        # Opcional: si tienes un entorno de desarrollo local que quieres documentar
+        # {
+        #     "url": "http://localhost:8000", 
+        #     "description": "Servidor de Desarrollo Local"
+        # }
+    ]
 )
-
 # --- Configuración de Logging ---
 logging.basicConfig(
     level=logging.DEBUG, 
@@ -396,6 +406,10 @@ async def consultar_articulo_html(
         texto_limpio_final = limpiar_texto_articulo(texto_extraido)
         return ArticuloHTML(idNorma=idNorma, idParte=idParte, url_fuente=url, selector_usado=selector_usado, texto_html_extraido=texto_limpio_final)
     except Exception as e: raise HTTPException(status_code=500, detail=f"Error al procesar HTML para idParte '{idParte}': {e}")
+# (otros imports)
+from fastapi import FastAPI # Asegúrate de que FastAPI esté importado
+
+# ... (resto de tu configuración de logging, fallbacks, constantes, modelos Pydantic, etc.)
 
 # Ejemplo para ejecutar con Uvicorn (si este archivo se llama main.py):
 # uvicorn main:app --reload --log-level debug
