@@ -13,7 +13,7 @@ from cachetools import TTLCache
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
     description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché, y truncamiento de listas de artículos y texto largo.",
-    version="1.9.0", # Incremento de versión por ajustes en /ley_html
+    version="1.9.0", 
     servers=[
         {
             "url": "https://consulta-leyes-chile.onrender.com", 
@@ -104,43 +104,78 @@ class ArticuloHTML(BaseModel):
     texto_html_extraido: str = Field(..., description="El texto HTML extraído, con formato mejorado. Puede estar truncado si excede el límite de longitud.")
 
 # --- Funciones de Lógica de Negocio ---
-# (Las funciones normalizar_numero_articulo_para_comparacion, limpiar_texto_articulo, 
-#  extraer_referencias_legales_mejorado, obtener_id_norma_async, obtener_xml_ley_async 
-#  y extraer_articulos se mantienen igual que en la versión v18. 
-#  Se omiten aquí por brevedad pero deben estar presentes en el archivo .py final)
-#  Asegúrate de copiar las versiones completas de estas funciones desde el artefacto v18.
 
 def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
-    if not num_str: return "s/n"; s = str(num_str).lower().strip(); logger.debug(f"Normalizando: '{num_str}' -> '{s}' (inicial)"); s = re.sub(r"^(artículo|articulo|art\.?|nro\.?|n[º°]|disposición|disp\.?)\s*", "", s, flags=re.IGNORECASE).strip(); s = s.rstrip('.-').strip();
+    if not num_str: return "s/n"
+    s = str(num_str).lower().strip()
+    logger.debug(f"Normalizando: '{num_str}' -> '{s}' (inicial)")
+    s = re.sub(r"^(artículo|articulo|art\.?|nro\.?|n[º°]|disposición|disp\.?)\s*", "", s, flags=re.IGNORECASE).strip()
+    s = s.rstrip('.-').strip()
     if s in WORDS_TO_INT: return WORDS_TO_INT[s]
     if s in ROMAN_TO_INT: return str(ROMAN_TO_INT[s])
-    prefijo_transitorio = ""; transitorio_match = re.match(r"^(transitorio|trans\.?|t)\s*(.*)", s, flags=re.IGNORECASE)
-    if transitorio_match: prefijo_transitorio = "t"; s = transitorio_match.group(2).strip().rstrip('.-').strip()
+    prefijo_transitorio = ""
+    transitorio_match = re.match(r"^(transitorio|trans\.?|t)\s*(.*)", s, flags=re.IGNORECASE)
+    if transitorio_match:
+        prefijo_transitorio = "t"
+        s = transitorio_match.group(2).strip().rstrip('.-').strip()
     for palabra, digito in WORDS_TO_INT.items():
         if re.search(r'\b' + re.escape(palabra) + r'\b', s): s = re.sub(r'\b' + re.escape(palabra) + r'\b', digito, s)
-    s = re.sub(r"[º°ª\.,]", "", s); s = s.strip().rstrip('-').strip(); partes_numericas = re.findall(r"(\d+)\s*([a-zA-Z]*)", s); componentes_normalizados = []; texto_restante = s
+    s = re.sub(r"[º°ª\.,]", "", s)
+    s = s.strip().rstrip('-').strip()
+    partes_numericas = re.findall(r"(\d+)\s*([a-zA-Z]*)", s)
+    logger.debug(f"Partes numéricas encontradas en '{s}': {partes_numericas}")
+    componentes_normalizados = []
+    texto_restante = s
     for num_part, letra_part in partes_numericas:
         componente = num_part
         if letra_part:
             if letra_part in ["bis", "ter", "quater"] or (len(letra_part) == 1 and letra_part.isalpha()): componente += letra_part
-        componentes_normalizados.append(componente); texto_restante = texto_restante.replace(num_part, "", 1).replace(letra_part, "", 1).strip()
-    if not componentes_normalizados and texto_restante:
-        posible_romano = texto_restante.replace(" ", "")
-        if posible_romano in ROMAN_TO_INT: componentes_normalizados.append(str(ROMAN_TO_INT[posible_romano])); texto_restante = ""
-    if not componentes_normalizados and texto_restante: componentes_normalizados.append(texto_restante.replace(" ", ""))
+        componentes_normalizados.append(componente)
+        texto_restante = texto_restante.replace(num_part, "", 1).replace(letra_part, "", 1).strip()
+    logger.debug(f"Componentes normalizados de partes numéricas: {componentes_normalizados}, texto restante: '{texto_restante}'")
+    if not componentes_normalizados and texto_restante: 
+        posible_romano = texto_restante.replace(" ", "") 
+        if posible_romano in ROMAN_TO_INT: 
+            componentes_normalizados.append(str(ROMAN_TO_INT[posible_romano]))
+            logger.debug(f"Componente romano añadido: '{str(ROMAN_TO_INT[posible_romano])}' desde '{posible_romano}'")
+            texto_restante = ""
+    if not componentes_normalizados and texto_restante: 
+        componentes_normalizados.append(texto_restante.replace(" ", ""))
+        logger.debug(f"Componente de texto restante añadido: '{texto_restante.replace(' ', '')}'")
     id_final = "".join(componentes_normalizados)
-    if not id_final:
-        s_limpio = re.sub(r"[^a-z0-9]", "", s.replace(" ", "")).strip()
-        if not s_limpio: return "s/n_error_normalizacion"
+    if not id_final: 
+        s_limpio = re.sub(r"[^a-z0-9]", "", s.replace(" ", "")).strip() 
+        logger.debug(f"ID final estaba vacío. s='{s}', s_limpio='{s_limpio}'")
+        if not s_limpio: 
+            logger.warning(f"Error de normalización para '{num_str}'. No se pudo extraer un ID limpio.")
+            return "s/n_error_normalizacion"
         id_final = s_limpio
-    id_con_prefijo = prefijo_transitorio + id_final if id_final else "s/n"; logger.debug(f"Normalización final para '{num_str}': '{id_con_prefijo}'"); return id_con_prefijo
+    id_con_prefijo = prefijo_transitorio + id_final if id_final else "s/n"
+    logger.debug(f"Normalización final para '{num_str}': '{id_con_prefijo}'")
+    return id_con_prefijo
 
 def limpiar_texto_articulo(texto: str) -> str:
-    if not texto: return ""; texto_limpio = re.sub(r'[ \t]+', ' ', texto); texto_limpio = re.sub(r'\n\s*\n+', '\n', texto_limpio); texto_limpio = "\n".join([line.strip() for line in texto_limpio.split('\n')]); return texto_limpio.strip()
+    if not texto: return ""
+    texto_limpio = re.sub(r'[ \t]+', ' ', texto)
+    texto_limpio = re.sub(r'\n\s*\n+', '\n', texto_limpio) 
+    texto_limpio = "\n".join([line.strip() for line in texto_limpio.split('\n')])
+    return texto_limpio.strip()
 
 def extraer_referencias_legales_mejorado(texto_articulo: str) -> List[str]:
     if not texto_articulo: return []
-    patrones = [r"ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+", r"decreto\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+", r"decreto\s+con\s+fuerza\s+de\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?", r"D\.F\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+(?:/\d+)?", r"D\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+", r"C[óo]digo\s+(?:Penal|Tributario|Civil|del\s+Trabajo|de\s+Comercio|Procesal\s+Penal|Sanitario|de\s+Miner[íi]a|de\s+Aguas)(?:\s+y\s+sus\s+modificaciones)?", r"art[íi]culo\s+[\w\d]+(?:\s*bis)?\s+d[e|el]\s+(?:presente\s+ley|esta\s+ley|la\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|C[óo]digo\s+\w+|D\.F\.L\.?\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|decreto\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+)", r"inciso\s+\w+\s+del\s+art[íi]culo\s+[\w\d]+(?:\s*bis)?", r"reglamento\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+", r"Constituci[oó]n\s+Pol[íi]tica\s+de\s+la\s+Rep[úu]blica", r"decreto\s+supremo\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?"]
+    patrones = [
+        r"ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+",
+        r"decreto\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+",
+        r"decreto\s+con\s+fuerza\s+de\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?",
+        r"D\.F\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+(?:/\d+)?",
+        r"D\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+",
+        r"C[óo]digo\s+(?:Penal|Tributario|Civil|del\s+Trabajo|de\s+Comercio|Procesal\s+Penal|Sanitario|de\s+Miner[íi]a|de\s+Aguas)(?:\s+y\s+sus\s+modificaciones)?",
+        r"art[íi]culo\s+[\w\d]+(?:\s*bis)?\s+d[e|el]\s+(?:presente\s+ley|esta\s+ley|la\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|C[óo]digo\s+\w+|D\.F\.L\.?\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|decreto\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+)",
+        r"inciso\s+\w+\s+del\s+art[íi]culo\s+[\w\d]+(?:\s*bis)?",
+        r"reglamento\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+",
+        r"Constituci[oó]n\s+Pol[íi]tica\s+de\s+la\s+Rep[úu]blica",
+        r"decreto\s+supremo\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?",
+    ]
     referencias_encontradas = set()
     texto_norm_espacios = re.sub(r'\s+', ' ', texto_articulo)
     for patron in patrones:
@@ -291,8 +326,7 @@ async def consultar_articulo_html(
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'}
             response = await client.get(url, timeout=10, headers=headers)
             logger.debug(f"Respuesta de /ley_html para {url} - Status: {response.status_code}")
-            # Loggear el inicio del HTML para verificar si es lo que esperamos
-            response_text_snippet = response.text[:2000] if response.text else "Respuesta vacía" # Aumentado snippet
+            response_text_snippet = response.text[:2000] if response.text else "Respuesta vacía"
             logger.debug(f"Inicio del HTML recibido de /ley_html (primeros 2000 chars):\n{response_text_snippet}")
             response.raise_for_status()
         except httpx.TimeoutException: 
@@ -306,14 +340,13 @@ async def consultar_articulo_html(
 
     try:
         soup = BeautifulSoup(response.text, "html.parser")
-        # Selectores ajustados y priorizados
         selectores_posibles = [
-            f"div.textoNorma[id^='p{idParte}']", # ID que empieza con 'p' + idParte y tiene clase 'textoNorma'
-            f"div[id='p{idParte}']",      
+            f"div.textoNorma[id^='p{idParte}']",      
             f"article[id='{idParte}']",  
             f"div.textoNorma[id*='{idParte}']", 
             f"div.textoArticulo[id*='{idParte}']",
-            f"div[id='{idParte}']"         
+            f"div[id='{idParte}']",
+            f"div[id^='p{idParte}']" # Selector más general que busca ID que *comienza con* p{idParte}
         ]
         div_contenido = None; selector_usado = "Ninguno"
         for selector_idx, selector in enumerate(selectores_posibles):
@@ -341,13 +374,12 @@ async def consultar_articulo_html(
                 else: 
                     error_message = f"No se encontró contenido para idParte '{idParte}' en norma '{idNorma}' con los selectores probados en {url}."
                     logger.error(error_message)
-                    # Loggear el HTML completo si no se encuentra nada, para depuración manual
-                    if len(response.text) < 20000: # Evitar logs excesivamente grandes
+                    if len(response.text) < 20000: 
                         logger.debug(f"HTML completo donde no se encontró idParte '{idParte}':\n{response.text}")
                     else:
                         logger.debug(f"HTML (primeros 20000 chars) donde no se encontró idParte '{idParte}':\n{response.text[:20000]}")
-                    raise HTTPException(status_code=404, detail=f"No se encontró el elemento de contenido específico para idParte '{idParte}'.")
-            except HTTPException as http_exc_inner: # Re-lanzar la HTTPException del bloque interno
+                    raise HTTPException(status_code=404, detail=f"No se encontró el elemento de contenido específico para idParte '{idParte}'.") # Devolver 404 si no se encuentra
+            except HTTPException as http_exc_inner: 
                 raise http_exc_inner
             except Exception as e_fallback:
                 logger.exception(f"Error durante el fallback de búsqueda de div_contenido para idParte '{idParte}'.")
@@ -362,7 +394,7 @@ async def consultar_articulo_html(
         
         return ArticuloHTML(idNorma=idNorma, idParte=idParte, url_fuente=url, selector_usado=selector_usado, texto_html_extraido=texto_limpio_final)
     except HTTPException as http_exc: 
-        raise http_exc
+        raise http_exc # Re-lanzar HTTPException explícitamente
     except Exception as e: 
         error_message = f"Error al parsear HTML o extraer texto para idNorma {idNorma}, idParte {idParte}."
         logger.exception(error_message) 
