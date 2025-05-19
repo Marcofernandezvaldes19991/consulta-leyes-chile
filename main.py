@@ -10,18 +10,6 @@ import time
 from pydantic import BaseModel, Field
 from cachetools import TTLCache 
 
-app = FastAPI(
-    title="API de Consulta de Leyes Chilenas",
-    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché, y truncamiento de listas de artículos y texto largo.",
-    version="1.9.0", # Versión restaurada
-    servers=[
-        {
-            "url": "https://consulta-leyes-chile.onrender.com", 
-            "description": "Servidor de Producción en Render"
-        }
-    ]
-)
-
 # --- Configuración de Logging ---
 logging.basicConfig(
     level=logging.DEBUG, 
@@ -29,6 +17,19 @@ logging.basicConfig(
     force=True 
 )
 logger = logging.getLogger(__name__) 
+logger.info("API v21.DEBUG (Diagnóstico UnboundLocalError) Iniciando...") # Log distintivo
+
+app = FastAPI(
+    title="API de Consulta de Leyes Chilenas",
+    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl (fuente XML).",
+    version="2.1.1", # Versión para diagnóstico
+    servers=[
+        {
+            "url": "https://consulta-leyes-chile.onrender.com", 
+            "description": "Servidor de Producción en Render"
+        }
+    ]
+)
 
 try:
     logging.getLogger("uvicorn").setLevel(logging.DEBUG)
@@ -95,20 +96,12 @@ class LeyDetalle(BaseModel):
     total_articulos_originales_en_ley: Optional[int] = Field(None, description="El número total de artículos que tiene la ley originalmente, si la lista de artículos devuelta fue truncada.")
     nota_truncamiento_lista: Optional[str] = Field(None, description="Nota indicando si la lista de artículos fue truncada.")
 
-
-class ArticuloHTML(BaseModel):
-    idNorma: str
-    idParte: str
-    url_fuente: str
-    selector_usado: str
-    texto_html_extraido: str = Field(..., description="El texto HTML extraído, con formato mejorado. Puede estar truncado si excede el límite de longitud.")
-
 # --- Funciones de Lógica de Negocio ---
 
 def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
     if not num_str: 
         return "s/n"
-    s = str(num_str).lower().strip() # 's' se define aquí
+    s = str(num_str).lower().strip() # 's' se define aquí, ANTES de cualquier uso
     logger.debug(f"Normalizando: '{num_str}' -> '{s}' (inicial)")
     
     s = re.sub(r"^(artículo|articulo|art\.?|nro\.?|n[º°]|disposición|disp\.?)\s*", "", s, flags=re.IGNORECASE).strip()
