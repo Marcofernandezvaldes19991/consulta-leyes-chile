@@ -1,3 +1,8 @@
+# main.py
+# API de Consulta de Leyes Chilenas – Marco Fernandez Valdes
+# Última revisión: 2025-05-19
+# Comentada y mejorada por GitHub Copilot Chat Assistant
+
 from fastapi import FastAPI, HTTPException, Query
 from typing import Optional, List, Any 
 import httpx 
@@ -10,6 +15,7 @@ import time
 from pydantic import BaseModel, Field
 from cachetools import TTLCache 
 
+# --- INICIALIZACIÓN DE LA APP FASTAPI ---
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
     description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl (fuente XML).",
@@ -22,7 +28,7 @@ app = FastAPI(
     ]
 )
 
-# --- Configuración de Logging ---
+# --- CONFIGURACIÓN DE LOGGING ---
 logging.basicConfig(
     level=logging.DEBUG, 
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,6 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__) 
 
 try:
+    # Forzamos logs de Uvicorn a nivel DEBUG para mejor depuración
     logging.getLogger("uvicorn").setLevel(logging.DEBUG)
     logging.getLogger("uvicorn.error").setLevel(logging.DEBUG)
     logging.getLogger("uvicorn.access").setLevel(logging.DEBUG)
@@ -38,12 +45,11 @@ try:
 except Exception as e:
     logger.warning(f"No se pudieron configurar los loggers de Uvicorn desde el código: {e}")
 
-# --- Configuración de Caché ---
+# --- CONFIGURACIÓN DE CACHÉ ---
 cache_id_norma = TTLCache(maxsize=100, ttl=3600)
 cache_xml_ley = TTLCache(maxsize=50, ttl=3600)
 
-
-# --- Carga de Fallbacks ---
+# --- CARGA DE FALLBACKS ---
 try:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     fallback_path = os.path.join(current_dir, "fallbacks.json")
@@ -60,7 +66,7 @@ except Exception as e:
     fallback_ids = {}
     logger.exception(f"Ocurrió un error inesperado al cargar 'fallbacks.json'.")
 
-# --- Constantes para Normalización y Truncamiento ---
+# --- CONSTANTES PARA NORMALIZACIÓN Y TRUNCAMIENTO ---
 ROMAN_TO_INT = {
     'i': 1, 'ii': 2, 'iii': 3, 'iv': 4, 'v': 5, 'vi': 6, 'vii': 7, 'viii': 8, 'ix': 9, 'x': 10,
     'xi': 11, 'xii': 12, 'xiii': 13, 'xiv': 14, 'xv': 15, 'xvi': 16, 'xvii': 17, 'xviii': 18, 'xix': 19, 'xx': 20,
@@ -78,7 +84,7 @@ MAX_ARTICULOS_RETURNED = 15
 TRUNCATION_MESSAGE_TEXT = "\n\n[... texto completo del artículo truncado por exceder el límite de longitud para esta API. Consulte la fuente original para el texto íntegro ...]"
 TRUNCATION_MESSAGE_LIST = f"Mostrando los primeros {MAX_ARTICULOS_RETURNED} artículos. La ley contiene más artículos. Para ver un artículo específico, por favor especifíquelo en la consulta."
 
-# --- Modelos Pydantic ---
+# --- MODELOS PYDANTIC ---
 class Articulo(BaseModel):
     articulo_display: str = Field(..., description="El número o identificador del artículo tal como se muestra originalmente (ej. 'Artículo 15', 'Primero Transitorio').")
     articulo_id_interno: str = Field(..., description="El identificador normalizado del artículo usado para búsquedas internas (ej. '15', 't1').")
@@ -95,19 +101,20 @@ class LeyDetalle(BaseModel):
     total_articulos_originales_en_ley: Optional[int] = Field(None, description="El número total de artículos que tiene la ley originalmente, si la lista de artículos devuelta fue truncada.")
     nota_truncamiento_lista: Optional[str] = Field(None, description="Nota indicando si la lista de artículos fue truncada.")
 
-# --- Funciones de Lógica de Negocio ---
-
+# --- FUNCIONES DE LÓGICA DE NEGOCIO ---
 def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
+    """
+    Normaliza el número de artículo a un formato estándar para poder comparar entre textos y XML.
+    """
     if not num_str: 
         return "s/n"
-    s = str(num_str).lower().strip() # 's' se define aquí
+    s = str(num_str).lower().strip()
     logger.debug(f"Normalizando: '{num_str}' -> '{s}' (inicial)")
     
-    # Limpieza inicial de prefijos y sufijos comunes antes de diccionarios
     s = re.sub(r"^(artículo|articulo|art\.?|nro\.?|n[º°]|disposición|disp\.?)\s*", "", s, flags=re.IGNORECASE).strip()
     s = s.rstrip('.-').strip() 
 
-    if s in WORDS_TO_INT: # Esta es la línea ~115 según el traceback anterior, ahora ~84
+    if s in WORDS_TO_INT: 
         logger.debug(f"Normalizado por WORDS_TO_INT: '{s}' -> '{WORDS_TO_INT[s]}'")
         return WORDS_TO_INT[s]
     if s in ROMAN_TO_INT:
@@ -171,6 +178,9 @@ def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
     return id_con_prefijo
 
 def limpiar_texto_articulo(texto: str) -> str:
+    """
+    Limpia el texto de un artículo, quitando espacios duplicados y saltos de línea innecesarios.
+    """
     if not texto: return ""
     texto_limpio = re.sub(r'[ \t]+', ' ', texto)
     texto_limpio = re.sub(r'\n\s*\n+', '\n', texto_limpio) 
@@ -178,6 +188,9 @@ def limpiar_texto_articulo(texto: str) -> str:
     return texto_limpio.strip()
 
 def extraer_referencias_legales_mejorado(texto_articulo: str) -> List[str]:
+    """
+    Busca referencias a otras leyes o normas dentro del texto de un artículo.
+    """
     if not texto_articulo: return []
     patrones = [
         r"ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+",
@@ -202,18 +215,37 @@ def extraer_referencias_legales_mejorado(texto_articulo: str) -> List[str]:
         except re.error as e: logger.error(f"Error en regex '{patron}': {e}")
     return sorted(list(referencias_encontradas))
 
+import asyncio
+
 async def obtener_id_norma_async(numero_ley: str, client: httpx.AsyncClient) -> Optional[str]:
+    """
+    Busca el idNorma de una ley a partir del número de ley, usando caché y fallbacks.
+    """
     norm_numero_ley_buscado = numero_ley.strip().replace(".", "").replace(",", "")
-    if not norm_numero_ley_buscado.isdigit(): logger.warning(f"El número de ley '{numero_ley}' no es puramente numérico.")
+    if not norm_numero_ley_buscado.isdigit(): 
+        logger.warning(f"El número de ley '{numero_ley}' no es puramente numérico.")
     cached_id = cache_id_norma.get(norm_numero_ley_buscado)
-    if cached_id: logger.info(f"IdNorma '{cached_id}' para ley '{norm_numero_ley_buscado}' obtenido desde caché."); return cached_id
+    if cached_id: 
+        logger.info(f"IdNorma '{cached_id}' para ley '{norm_numero_ley_buscado}' obtenido desde caché.")
+        return cached_id
     if norm_numero_ley_buscado in fallback_ids:
-        logger.info(f"Usando ID de fallback para ley '{norm_numero_ley_buscado}': {fallback_ids[norm_numero_ley_buscado]}"); cache_id_norma[norm_numero_ley_buscado] = fallback_ids[norm_numero_ley_buscado]; return fallback_ids[norm_numero_ley_buscado]
-    if not norm_numero_ley_buscado.isdigit(): logger.warning(f"Número de ley '{norm_numero_ley_buscado}' no es numérico y no se encontró en fallbacks."); return None
-    url = f"https://www.leychile.cl/Consulta/indice_normas_busqueda_simple?formato=xml&modo=1&busqueda=ley+{norm_numero_ley_buscado}"; logger.info(f"Consultando URL para ID de norma (async): {url}"); max_retries = 3; retry_delay = 1
+        logger.info(f"Usando ID de fallback para ley '{norm_numero_ley_buscado}': {fallback_ids[norm_numero_ley_buscado]}")
+        cache_id_norma[norm_numero_ley_buscado] = fallback_ids[norm_numero_ley_buscado]
+        return fallback_ids[norm_numero_ley_buscado]
+    if not norm_numero_ley_buscado.isdigit(): 
+        logger.warning(f"Número de ley '{norm_numero_ley_buscado}' no es numérico y no se encontró en fallbacks.")
+        return None
+    url = f"https://www.leychile.cl/Consulta/indice_normas_busqueda_simple?formato=xml&modo=1&busqueda=ley+{norm_numero_ley_buscado}"
+    logger.info(f"Consultando URL para ID de norma (async): {url}")
+    max_retries = 3
+    retry_delay = 1
     for attempt in range(max_retries):
         try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'}; response = await client.get(url, timeout=10, headers=headers); response.raise_for_status(); soup = BeautifulSoup(response.content, "xml"); normas = soup.find_all("Norma")
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'}
+            response = await client.get(url, timeout=10, headers=headers)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, "xml")
+            normas = soup.find_all("Norma")
             if not normas: return None
             for norma in normas:
                 numero_norma_tag = norma.find("Numero")
@@ -221,31 +253,63 @@ async def obtener_id_norma_async(numero_ley: str, client: httpx.AsyncClient) -> 
                     numero_norma_en_xml = numero_norma_tag.text.strip().replace(".", "").replace(",", "")
                     if numero_norma_en_xml == norm_numero_ley_buscado:
                         id_norma_tag = norma.find("IdNorma")
-                        if id_norma_tag and id_norma_tag.text: id_encontrado = id_norma_tag.text.strip(); cache_id_norma[norm_numero_ley_buscado] = id_encontrado; return id_encontrado
+                        if id_norma_tag and id_norma_tag.text:
+                            id_encontrado = id_norma_tag.text.strip()
+                            cache_id_norma[norm_numero_ley_buscado] = id_encontrado
+                            return id_encontrado
             return None
-        except httpx.TimeoutException: logger.warning(f"Timeout (Intento {attempt + 1}/{max_retries})")
-        except httpx.RequestError as e: logger.error(f"Error HTTP (Intento {attempt + 1}/{max_retries}): {e}")
-        except Exception as e: logger.exception(f"Error procesando ID norma."); return None
-        if attempt < max_retries - 1: await asyncio.sleep(retry_delay); retry_delay *= 2
-        else: logger.error(f"Fallaron todos los reintentos para ID norma."); return None
+        except httpx.TimeoutException:
+            logger.warning(f"Timeout (Intento {attempt + 1}/{max_retries})")
+        except httpx.RequestError as e:
+            logger.error(f"Error HTTP (Intento {attempt + 1}/{max_retries}): {e}")
+        except Exception as e:
+            logger.exception(f"Error procesando ID norma.")
+            return None
+        if attempt < max_retries - 1:
+            await asyncio.sleep(retry_delay)
+            retry_delay *= 2
+        else:
+            logger.error(f"Fallaron todos los reintentos para ID norma.")
+            return None
     return None
 
 async def obtener_xml_ley_async(id_norma: str, client: httpx.AsyncClient) -> Optional[bytes]:
+    """
+    Descarga el XML del texto completo de la ley, usando caché.
+    """
     cached_xml = cache_xml_ley.get(id_norma)
-    if cached_xml: logger.info(f"XML para IdNorma '{id_norma}' obtenido desde caché."); return cached_xml
-    url = f"https://www.leychile.cl/Consulta/obtxml?opt=7&idNorma={id_norma}&notaPIE=1"; logger.info(f"Consultando XML de ley con IDNorma {id_norma} en URL (async): {url}")
+    if cached_xml: 
+        logger.info(f"XML para IdNorma '{id_norma}' obtenido desde caché.")
+        return cached_xml
+    url = f"https://www.leychile.cl/Consulta/obtxml?opt=7&idNorma={id_norma}&notaPIE=1"
+    logger.info(f"Consultando XML de ley con IDNorma {id_norma} en URL (async): {url}")
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'}; response = await client.get(url, timeout=15, headers=headers); response.raise_for_status(); xml_content = response.content
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'}
+        response = await client.get(url, timeout=15, headers=headers)
+        response.raise_for_status()
+        xml_content = response.content
         if xml_content: cache_xml_ley[id_norma] = xml_content
         return xml_content
-    except httpx.TimeoutException: logger.warning(f"Timeout XML IdNorma {id_norma}"); return None
-    except httpx.RequestError as e: logger.error(f"Error HTTP XML IdNorma {id_norma}: {e}"); return None
-    except Exception as e: logger.exception(f"Error inesperado XML IdNorma {id_norma}."); return None
+    except httpx.TimeoutException:
+        logger.warning(f"Timeout XML IdNorma {id_norma}")
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"Error HTTP XML IdNorma {id_norma}: {e}")
+        return None
+    except Exception as e:
+        logger.exception(f"Error inesperado XML IdNorma {id_norma}.")
+        return None
 
 def extraer_articulos(xml_data: Optional[bytes]) -> List[Articulo]:
+    """
+    Extrae la lista de artículos desde el XML de la ley.
+    """
     if not xml_data: return []
-    try: soup = BeautifulSoup(xml_data, "lxml-xml")
-    except Exception as e: logger.exception(f"Error al parsear XML."); return []
+    try: 
+        soup = BeautifulSoup(xml_data, "lxml-xml")
+    except Exception as e: 
+        logger.exception(f"Error al parsear XML.")
+        return []
     articulos_procesados: List[Articulo] = []
     estructuras_funcionales_tags = soup.find_all("EstructuraFuncional")
     logger.info(f"Se encontraron {len(estructuras_funcionales_tags)} etiquetas <EstructuraFuncional>.")
@@ -263,12 +327,16 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Articulo]:
             display_temp = match_numero_en_texto.group(1).strip()
             display_temp = re.sub(r"^(artículo|articulo|art\.?)\s*", "", display_temp, flags=re.IGNORECASE).strip()
             numero_display_extraido = display_temp.rstrip('.-').strip()
-            if match_numero_en_texto.group(3) and match_numero_en_texto.group(3).strip(): texto_neto_articulo = match_numero_en_texto.group(3).strip()
-            elif numero_display_extraido != texto_completo_articulo: texto_neto_articulo = ""
-        else: numero_display_extraido = texto_completo_articulo.split('.')[0].split('-')[0].strip()
+            if match_numero_en_texto.group(3) and match_numero_en_texto.group(3).strip():
+                texto_neto_articulo = match_numero_en_texto.group(3).strip()
+            elif numero_display_extraido != texto_completo_articulo:
+                texto_neto_articulo = ""
+        else:
+            numero_display_extraido = texto_completo_articulo.split('.')[0].split('-')[0].strip()
         numero_id_interno = normalizar_numero_articulo_para_comparacion(numero_display_extraido)
         if numero_id_interno == "s/n_error_normalizacion" or not numero_id_interno: continue
-        if not texto_neto_articulo.strip() and numero_display_extraido == texto_completo_articulo: texto_neto_articulo = numero_display_extraido
+        if not texto_neto_articulo.strip() and numero_display_extraido == texto_completo_articulo:
+            texto_neto_articulo = numero_display_extraido
         texto_final_limpio = limpiar_texto_articulo(texto_neto_articulo) 
         if len(texto_final_limpio) > MAX_TEXT_LENGTH: 
             logger.warning(f"Artículo (display='{numero_display_extraido}', id_interno='{numero_id_interno}') texto truncado. Longitud original: {len(texto_final_limpio)}")
@@ -281,23 +349,29 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Articulo]:
     logger.info(f"Extracción finalizada. {len(articulos_procesados)} artículos procesados.")
     return articulos_procesados
 
-# --- Endpoints de la API ---
-import asyncio 
-
+# --- ENDPOINT DE LA API PRINCIPAL ---
 @app.get("/ley", response_model=LeyDetalle, summary="Consultar Ley por Número y Artículo (Opcional)")
 async def consultar_ley(
     numero_ley: str = Query(..., description="Número de la ley a consultar (ej. '21595')."), 
     articulo: Optional[str] = Query(None, description="Número o identificador del artículo a consultar (ej. '15', '1 bis', 'Primero Transitorio').")
 ):
-    logger.info(f"Recibida consulta para ley: {numero_ley}, artículo: {articulo if articulo else 'Todos'}")
+    logger.info(f"INICIO /ley | numero_ley={numero_ley}, articulo={articulo if articulo else 'Todos'}")
     async with httpx.AsyncClient() as client: 
         id_norma = await obtener_id_norma_async(numero_ley, client)
-        if not id_norma: raise HTTPException(status_code=404, detail=f"No se encontró ID para la ley {numero_ley}.")
+        logger.info(f"ID NORMA: {id_norma}")
+        if not id_norma:
+            logger.error(f"No se encontró ID para la ley {numero_ley}")
+            raise HTTPException(status_code=404, detail=f"No se encontró ID para la ley {numero_ley}.")
         xml_content = await obtener_xml_ley_async(id_norma, client)
-        if not xml_content: raise HTTPException(status_code=503, detail=f"No se pudo obtener XML para ley {numero_ley} (ID Norma: {id_norma}).")
+        logger.info(f"XML recibido: {'Sí' if xml_content else 'No'}")
+        if not xml_content:
+            logger.error(f"No se pudo obtener XML para ley {numero_ley} (ID Norma: {id_norma})")
+            raise HTTPException(status_code=503, detail=f"No se pudo obtener XML para ley {numero_ley} (ID Norma: {id_norma}).")
     
     articulos_data_original = extraer_articulos(xml_content) 
+    logger.info(f"Artículos extraídos: {len(articulos_data_original)}")
     if not articulos_data_original: 
+        logger.error(f"No se extrajeron artículos de la ley {numero_ley} (ID Norma: {id_norma})")
         raise HTTPException(status_code=404, detail=f"No se extrajeron artículos de la ley {numero_ley} (ID Norma: {id_norma}).")
     
     articulos_a_devolver: List[Articulo] = []
@@ -306,7 +380,9 @@ async def consultar_ley(
 
     if articulo:
         articulo_buscado_norm = normalizar_numero_articulo_para_comparacion(articulo)
+        logger.info(f"Artículo buscado normalizado: {articulo_buscado_norm}")
         if articulo_buscado_norm == "s/n_error_normalizacion" or not articulo_buscado_norm or articulo_buscado_norm == "s/n":
+            logger.error(f"No se pudo normalizar el artículo buscado: '{articulo}'")
             raise HTTPException(status_code=400, detail=f"No se pudo normalizar el artículo buscado: '{articulo}'.")
         
         articulo_encontrado_obj: Optional[Articulo] = None
@@ -319,17 +395,27 @@ async def consultar_ley(
             try:
                 termino_busqueda_texto = re.escape(articulo_buscado_norm.replace("t",""))
                 patron_texto = re.compile(r"\b(?:art(?:ículo|iculo)?s?\.?|art\.?|disposición|disp\.?)\s+(?:transitorio|trans\.?\s*)?" + termino_busqueda_texto + r"(?:[\sº°ªÞ,\.;:\(\)]|\b|$)", re.IGNORECASE)
-            except re.error as e: raise HTTPException(status_code=500, detail="Error interno en búsqueda textual.")
+            except re.error as e:
+                logger.error(f"Error interno en búsqueda textual: {e}")
+                raise HTTPException(status_code=500, detail="Error interno en búsqueda textual.")
             for art_obj in articulos_data_original:
                 if patron_texto.search(art_obj.texto):
                     art_obj.nota_busqueda = f"Encontrado por mención de '{articulo}' (normalizado a '{articulo_buscado_norm}') en texto."
                     articulo_encontrado_obj = art_obj
                     break 
         if articulo_encontrado_obj:
+            logger.info(f"Artículo encontrado: {articulo_encontrado_obj.articulo_display}")
             articulos_a_devolver = [articulo_encontrado_obj]
         else: 
-            ids_internos = [a.articulo_id_interno for a in articulos_data_original]; displays = [a.articulo_display for a in articulos_data_original]
-            raise HTTPException(status_code=404, detail={"error": f"Artículo '{articulo}' (buscado como '{articulo_buscado_norm}') no encontrado.", "sugerencia": "Verifique número.", "ids_disponibles": ids_internos[:10], "displays_disponibles": displays[:10]})
+            ids_internos = [a.articulo_id_interno for a in articulos_data_original]
+            displays = [a.articulo_display for a in articulos_data_original]
+            logger.error(f"Artículo '{articulo}' no encontrado en la ley {numero_ley}")
+            raise HTTPException(status_code=404, detail={
+                "error": f"Artículo '{articulo}' (buscado como '{articulo_buscado_norm}') no encontrado.",
+                "sugerencia": "Verifique número.",
+                "ids_disponibles": ids_internos[:10],
+                "displays_disponibles": displays[:10]
+            })
     else: 
         if len(articulos_data_original) > MAX_ARTICULOS_RETURNED:
             logger.info(f"Ley {numero_ley} tiene {len(articulos_data_original)} artículos. Devolviendo los primeros {MAX_ARTICULOS_RETURNED}.")
@@ -338,6 +424,8 @@ async def consultar_ley(
         else:
             articulos_a_devolver = articulos_data_original
     
+    logger.info(f"ANTES DE RETURN: {len(articulos_a_devolver)} artículos a devolver")
+    # --- RECOMENDACIÓN: Siempre retorna el modelo LeyDetalle, nunca un diccionario vacío ---
     return LeyDetalle(
         ley=numero_ley, 
         id_norma=id_norma, 
@@ -347,7 +435,7 @@ async def consultar_ley(
         nota_truncamiento_lista=nota_truncamiento_lista_resp
     )
 
-# El endpoint /ley_html ha sido eliminado.
-
-# Ejemplo para ejecutar con Uvicorn (si este archivo se llama main.py):
-# uvicorn main:app --reload --log-level debug
+# --- FIN DEL ARCHIVO main.py ---
+# RECOMENDACIÓN: Para producción, dividir utilidades y modelos en archivos propios.
+# TODO: Considerar agregar endpoint de salud (/health) y pruebas automáticas.
+# Para ejecutar local: uvicorn main:app --reload --log-level debug
