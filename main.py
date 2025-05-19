@@ -12,8 +12,8 @@ from cachetools import TTLCache
 
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
-    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl (fuente XML).",
-    version="2.1.0", # Versión actualizada tras simplificación
+    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye operaciones asíncronas, caché, y truncamiento de listas de artículos y texto largo.",
+    version="1.9.0", 
     servers=[
         {
             "url": "https://consulta-leyes-chile.onrender.com", 
@@ -95,52 +95,87 @@ class LeyDetalle(BaseModel):
     total_articulos_originales_en_ley: Optional[int] = Field(None, description="El número total de artículos que tiene la ley originalmente, si la lista de artículos devuelta fue truncada.")
     nota_truncamiento_lista: Optional[str] = Field(None, description="Nota indicando si la lista de artículos fue truncada.")
 
-# Ya no se necesita ArticuloHTML
-# class ArticuloHTML(BaseModel):
-#     idNorma: str
-#     idParte: str
-#     url_fuente: str
-#     selector_usado: str
-#     texto_html_extraido: str = Field(..., description="El texto HTML extraído, con formato mejorado. Puede estar truncado si excede el límite de longitud.")
+
+class ArticuloHTML(BaseModel): # Aunque el endpoint /ley_html se elimine, mantenemos el modelo por si se reutiliza o para referencia.
+    idNorma: str
+    idParte: str
+    url_fuente: str
+    selector_usado: str
+    texto_html_extraido: str = Field(..., description="El texto HTML extraído, con formato mejorado. Puede estar truncado si excede el límite de longitud.")
 
 # --- Funciones de Lógica de Negocio ---
-# (Las funciones normalizar_numero_articulo_para_comparacion, limpiar_texto_articulo, 
-#  extraer_referencias_legales_mejorado, obtener_id_norma_async, obtener_xml_ley_async 
-#  y extraer_articulos se mantienen igual que en la versión v20. 
-#  Se omiten aquí por brevedad pero deben estar presentes en el archivo .py final)
-#  Asegúrate de copiar las versiones completas de estas funciones desde el artefacto v20.
 
 def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
-    if not num_str: return "s/n"; s = str(num_str).lower().strip(); logger.debug(f"Normalizando: '{num_str}' -> '{s}' (inicial)"); s = re.sub(r"^(artículo|articulo|art\.?|nro\.?|n[º°]|disposición|disp\.?)\s*", "", s, flags=re.IGNORECASE).strip(); s = s.rstrip('.-').strip();
+    if not num_str: return "s/n"
+    s = str(num_str).lower().strip()
+    logger.debug(f"Normalizando: '{num_str}' -> '{s}' (inicial)")
+    s = re.sub(r"^(artículo|articulo|art\.?|nro\.?|n[º°]|disposición|disp\.?)\s*", "", s, flags=re.IGNORECASE).strip()
+    s = s.rstrip('.-').strip()
     if s in WORDS_TO_INT: return WORDS_TO_INT[s]
     if s in ROMAN_TO_INT: return str(ROMAN_TO_INT[s])
-    prefijo_transitorio = ""; transitorio_match = re.match(r"^(transitorio|trans\.?|t)\s*(.*)", s, flags=re.IGNORECASE)
-    if transitorio_match: prefijo_transitorio = "t"; s = transitorio_match.group(2).strip().rstrip('.-').strip()
+    prefijo_transitorio = ""
+    transitorio_match = re.match(r"^(transitorio|trans\.?|t)\s*(.*)", s, flags=re.IGNORECASE)
+    if transitorio_match:
+        prefijo_transitorio = "t"
+        s = transitorio_match.group(2).strip().rstrip('.-').strip()
     for palabra, digito in WORDS_TO_INT.items():
         if re.search(r'\b' + re.escape(palabra) + r'\b', s): s = re.sub(r'\b' + re.escape(palabra) + r'\b', digito, s)
-    s = re.sub(r"[º°ª\.,]", "", s); s = s.strip().rstrip('-').strip(); partes_numericas = re.findall(r"(\d+)\s*([a-zA-Z]*)", s); componentes_normalizados = []; texto_restante = s
+    s = re.sub(r"[º°ª\.,]", "", s)
+    s = s.strip().rstrip('-').strip()
+    partes_numericas = re.findall(r"(\d+)\s*([a-zA-Z]*)", s)
+    logger.debug(f"Partes numéricas encontradas en '{s}': {partes_numericas}")
+    componentes_normalizados = []
+    texto_restante = s
     for num_part, letra_part in partes_numericas:
         componente = num_part
         if letra_part:
             if letra_part in ["bis", "ter", "quater"] or (len(letra_part) == 1 and letra_part.isalpha()): componente += letra_part
-        componentes_normalizados.append(componente); texto_restante = texto_restante.replace(num_part, "", 1).replace(letra_part, "", 1).strip()
-    if not componentes_normalizados and texto_restante:
-        posible_romano = texto_restante.replace(" ", "")
-        if posible_romano in ROMAN_TO_INT: componentes_normalizados.append(str(ROMAN_TO_INT[posible_romano])); texto_restante = ""
-    if not componentes_normalizados and texto_restante: componentes_normalizados.append(texto_restante.replace(" ", ""))
+        componentes_normalizados.append(componente)
+        texto_restante = texto_restante.replace(num_part, "", 1).replace(letra_part, "", 1).strip()
+    logger.debug(f"Componentes normalizados de partes numéricas: {componentes_normalizados}, texto restante: '{texto_restante}'")
+    if not componentes_normalizados and texto_restante: 
+        posible_romano = texto_restante.replace(" ", "") 
+        if posible_romano in ROMAN_TO_INT: 
+            componentes_normalizados.append(str(ROMAN_TO_INT[posible_romano]))
+            logger.debug(f"Componente romano añadido: '{str(ROMAN_TO_INT[posible_romano])}' desde '{posible_romano}'")
+            texto_restante = ""
+    if not componentes_normalizados and texto_restante: 
+        componentes_normalizados.append(texto_restante.replace(" ", ""))
+        logger.debug(f"Componente de texto restante añadido: '{texto_restante.replace(' ', '')}'")
     id_final = "".join(componentes_normalizados)
-    if not id_final:
-        s_limpio = re.sub(r"[^a-z0-9]", "", s.replace(" ", "")).strip()
-        if not s_limpio: return "s/n_error_normalizacion"
+    if not id_final: 
+        s_limpio = re.sub(r"[^a-z0-9]", "", s.replace(" ", "")).strip() 
+        logger.debug(f"ID final estaba vacío. s='{s}', s_limpio='{s_limpio}'")
+        if not s_limpio: 
+            logger.warning(f"Error de normalización para '{num_str}'. No se pudo extraer un ID limpio.")
+            return "s/n_error_normalizacion"
         id_final = s_limpio
-    id_con_prefijo = prefijo_transitorio + id_final if id_final else "s/n"; logger.debug(f"Normalización final para '{num_str}': '{id_con_prefijo}'"); return id_con_prefijo
+    id_con_prefijo = prefijo_transitorio + id_final if id_final else "s/n"
+    logger.debug(f"Normalización final para '{num_str}': '{id_con_prefijo}'")
+    return id_con_prefijo
 
 def limpiar_texto_articulo(texto: str) -> str:
-    if not texto: return ""; texto_limpio = re.sub(r'[ \t]+', ' ', texto); texto_limpio = re.sub(r'\n\s*\n+', '\n', texto_limpio); texto_limpio = "\n".join([line.strip() for line in texto_limpio.split('\n')]); return texto_limpio.strip()
+    if not texto: return ""
+    texto_limpio = re.sub(r'[ \t]+', ' ', texto)
+    texto_limpio = re.sub(r'\n\s*\n+', '\n', texto_limpio) 
+    texto_limpio = "\n".join([line.strip() for line in texto_limpio.split('\n')])
+    return texto_limpio.strip()
 
 def extraer_referencias_legales_mejorado(texto_articulo: str) -> List[str]:
     if not texto_articulo: return []
-    patrones = [r"ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+", r"decreto\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+", r"decreto\s+con\s+fuerza\s+de\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?", r"D\.F\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+(?:/\d+)?", r"D\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+", r"C[óo]digo\s+(?:Penal|Tributario|Civil|del\s+Trabajo|de\s+Comercio|Procesal\s+Penal|Sanitario|de\s+Miner[íi]a|de\s+Aguas)(?:\s+y\s+sus\s+modificaciones)?", r"art[íi]culo\s+[\w\d]+(?:\s*bis)?\s+d[e|el]\s+(?:presente\s+ley|esta\s+ley|la\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|C[óo]digo\s+\w+|D\.F\.L\.?\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|decreto\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+)", r"inciso\s+\w+\s+del\s+art[íi]culo\s+[\w\d]+(?:\s*bis)?", r"reglamento\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+", r"Constituci[oó]n\s+Pol[íi]tica\s+de\s+la\s+Rep[úu]blica", r"decreto\s+supremo\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?"]
+    patrones = [
+        r"ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+",
+        r"decreto\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+",
+        r"decreto\s+con\s+fuerza\s+de\s+ley\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?",
+        r"D\.F\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+(?:/\d+)?",
+        r"D\.L\.?\s+(?:N(?:[°ºªo]|\.?)?|No\.)?\s*[\d\.]+",
+        r"C[óo]digo\s+(?:Penal|Tributario|Civil|del\s+Trabajo|de\s+Comercio|Procesal\s+Penal|Sanitario|de\s+Miner[íi]a|de\s+Aguas)(?:\s+y\s+sus\s+modificaciones)?",
+        r"art[íi]culo\s+[\w\d]+(?:\s*bis)?\s+d[e|el]\s+(?:presente\s+ley|esta\s+ley|la\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|C[óo]digo\s+\w+|D\.F\.L\.?\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+|decreto\s+ley\s+N(?:[°ºªo]|\.?)?\s*[\d\.]+)",
+        r"inciso\s+\w+\s+del\s+art[íi]culo\s+[\w\d]+(?:\s*bis)?",
+        r"reglamento\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+",
+        r"Constituci[oó]n\s+Pol[íi]tica\s+de\s+la\s+Rep[úu]blica",
+        r"decreto\s+supremo\s+(?:N(?:[°ºªo]|\.?)?|número)?\s*[\d\.]+(?:,\s*de\s+\d{4}(?:,\s*d[e|el]\s*\w+(?:\s+de\s+\w+)*)?)?",
+    ]
     referencias_encontradas = set()
     texto_norm_espacios = re.sub(r'\s+', ' ', texto_articulo)
     for patron in patrones:
@@ -233,12 +268,7 @@ def extraer_articulos(xml_data: Optional[bytes]) -> List[Articulo]:
 # --- Endpoints de la API ---
 import asyncio 
 
-@app.get(
-    "/ley", 
-    response_model=LeyDetalle, # El endpoint siempre devolverá LeyDetalle
-    summary="Consultar Ley por Número y Artículo (Opcional)",
-    description="Obtiene los artículos de una ley chilena. Si se especifica un artículo, la lista de artículos en la respuesta contendrá solo ese artículo (si se encuentra)."
-)
+@app.get("/ley", response_model=LeyDetalle, summary="Consultar Ley por Número y Artículo (Opcional)")
 async def consultar_ley(
     numero_ley: str = Query(..., description="Número de la ley a consultar (ej. '21595')."), 
     articulo: Optional[str] = Query(None, description="Número o identificador del artículo a consultar (ej. '15', '1 bis', 'Primero Transitorio').")
@@ -264,35 +294,27 @@ async def consultar_ley(
             raise HTTPException(status_code=400, detail=f"No se pudo normalizar el artículo buscado: '{articulo}'.")
         
         articulo_encontrado_obj: Optional[Articulo] = None
-        # Buscar por ID exacto
         for art_obj in articulos_data_original: 
             if art_obj.articulo_id_interno == articulo_buscado_norm:
-                logger.info(f"Artículo '{articulo}' (normalizado '{articulo_buscado_norm}') encontrado por ID exacto.")
                 articulo_encontrado_obj = art_obj
                 break
         
-        if not articulo_encontrado_obj: # Si no se encontró por ID, intentar búsqueda textual
-            logger.info(f"Artículo '{articulo_buscado_norm}' no encontrado por ID exacto. Intentando búsqueda textual.")
+        if not articulo_encontrado_obj: 
             try:
                 termino_busqueda_texto = re.escape(articulo_buscado_norm.replace("t",""))
                 patron_texto = re.compile(r"\b(?:art(?:ículo|iculo)?s?\.?|art\.?|disposición|disp\.?)\s+(?:transitorio|trans\.?\s*)?" + termino_busqueda_texto + r"(?:[\sº°ªÞ,\.;:\(\)]|\b|$)", re.IGNORECASE)
-            except re.error as e: 
-                logger.exception("Error compilando regex para búsqueda textual.")
-                raise HTTPException(status_code=500, detail="Error interno en búsqueda textual.")
+            except re.error as e: raise HTTPException(status_code=500, detail="Error interno en búsqueda textual.")
             for art_obj in articulos_data_original:
                 if patron_texto.search(art_obj.texto):
-                    logger.info(f"Artículo '{articulo}' (normalizado '{articulo_buscado_norm}') encontrado por búsqueda textual.")
                     art_obj.nota_busqueda = f"Encontrado por mención de '{articulo}' (normalizado a '{articulo_buscado_norm}') en texto."
                     articulo_encontrado_obj = art_obj
                     break 
-        
         if articulo_encontrado_obj:
             articulos_a_devolver = [articulo_encontrado_obj]
-        else: # Si no se encontró de ninguna forma
+        else: 
             ids_internos = [a.articulo_id_interno for a in articulos_data_original]; displays = [a.articulo_display for a in articulos_data_original]
-            logger.warning(f"Artículo '{articulo}' (buscado como '{articulo_buscado_norm}') no encontrado en ley {numero_ley}. IDs disponibles: {ids_internos[:10]}")
             raise HTTPException(status_code=404, detail={"error": f"Artículo '{articulo}' (buscado como '{articulo_buscado_norm}') no encontrado.", "sugerencia": "Verifique número.", "ids_disponibles": ids_internos[:10], "displays_disponibles": displays[:10]})
-    else: # Si no se especificó un artículo, devolver la lista (posiblemente truncada)
+    else: 
         if len(articulos_data_original) > MAX_ARTICULOS_RETURNED:
             logger.info(f"Ley {numero_ley} tiene {len(articulos_data_original)} artículos. Devolviendo los primeros {MAX_ARTICULOS_RETURNED}.")
             articulos_a_devolver = articulos_data_original[:MAX_ARTICULOS_RETURNED]
@@ -309,7 +331,7 @@ async def consultar_ley(
         nota_truncamiento_lista=nota_truncamiento_lista_resp
     )
 
-# El endpoint /ley_html se ha eliminado.
+# El endpoint /ley_html ha sido eliminado.
 
 # Ejemplo para ejecutar con Uvicorn (si este archivo se llama main.py):
 # uvicorn main:app --reload --log-level debug
