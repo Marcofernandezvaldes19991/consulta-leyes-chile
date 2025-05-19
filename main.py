@@ -1,6 +1,6 @@
 # main.py
 # API de Consulta de Leyes Chilenas
-# Versión 2.2.0 (Diagnóstico Final UnboundLocalError)
+# Versión 1.9.0 (Restaurada con /ley_html y correcciones de errores previos)
 
 import logging 
 # Configurar logging ANTES de cualquier otra cosa para asegurar que se aplique
@@ -10,7 +10,7 @@ logging.basicConfig(
     force=True 
 )
 logger = logging.getLogger(__name__) 
-logger.info("API v22.FINAL (VERIFICACION DEPLOYMENT) INICIANDO...") # Log distintivo
+logger.info("API v19.HTML_DIAG (Restaurada con /ley_html) INICIANDO...") # Log distintivo
 
 from fastapi import FastAPI, HTTPException, Query
 from typing import Optional, List, Any 
@@ -25,8 +25,8 @@ from cachetools import TTLCache
 
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
-    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl (fuente XML).",
-    version="2.2.0", 
+    description="Permite consultar artículos de leyes chilenas obteniendo datos desde LeyChile.cl. Esta versión incluye /ley (XML) y /ley_html (HTML scraping).",
+    version="1.9.0", 
     servers=[
         {
             "url": "https://consulta-leyes-chile.onrender.com", # Asegúrate que esta sea tu URL de Render
@@ -100,6 +100,14 @@ class LeyDetalle(BaseModel):
     articulos: List[Articulo] = Field(..., description="La lista de artículos (puede ser uno solo si se buscó un artículo específico, o una lista truncada si la ley es muy extensa).")
     total_articulos_originales_en_ley: Optional[int] = Field(None, description="El número total de artículos que tiene la ley originalmente, si la lista de artículos devuelta fue truncada.")
     nota_truncamiento_lista: Optional[str] = Field(None, description="Nota indicando si la lista de artículos fue truncada.")
+
+
+class ArticuloHTML(BaseModel):
+    idNorma: str
+    idParte: str
+    url_fuente: str
+    selector_usado: str
+    texto_html_extraido: str = Field(..., description="El texto HTML extraído, con formato mejorado. Puede estar truncado si excede el límite de longitud.")
 
 # --- Funciones de Lógica de Negocio ---
 
@@ -373,7 +381,91 @@ async def consultar_ley(
         nota_truncamiento_lista=nota_truncamiento_lista_resp
     )
 
-# El endpoint /ley_html ha sido eliminado.
+@app.get("/ley_html", response_model=ArticuloHTML, summary="Consultar Artículo por idNorma e idParte (HTML)")
+async def consultar_articulo_html(
+    idNorma: str = Query(..., description="El IdNorma de la ley."), 
+    idParte: str = Query(..., description="El idParte específico del artículo o sección.")
+):
+    logger.info(f"Consultando HTML desde bcn.cl para idNorma: {idNorma}, idParte: {idParte}")
+    url = f"https://www.bcn.cl/leychile/navegar?idNorma={idNorma}&idParte={idParte}"
+    async with httpx.AsyncClient() as client:
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0'}
+            response = await client.get(url, timeout=10, headers=headers)
+            logger.debug(f"Respuesta de /ley_html para {url} - Status: {response.status_code}")
+            response_text_snippet = response.text[:2000] if response.text else "Respuesta vacía"
+            logger.debug(f"Inicio del HTML recibido de /ley_html (primeros 2000 chars):\n{response_text_snippet}")
+            response.raise_for_status()
+        except httpx.TimeoutException: 
+            error_message = f"Timeout al obtener HTML para idNorma {idNorma}, idParte {idParte} desde {url}"
+            logger.error(error_message)
+            raise HTTPException(status_code=504, detail=error_message)
+        except httpx.RequestError as e: 
+            error_message = f"Error en petición HTTP para HTML (idNorma {idNorma}, idParte {idParte}) desde {url}: {e}"
+            logger.exception(error_message)
+            raise HTTPException(status_code=502, detail=f"No se pudo obtener el contenido de {url}. Error: {e}")
+
+    try:
+        soup = BeautifulSoup(response.text, "html.parser")
+        selectores_posibles = [
+            f"div.textoNorma[id^='p{idParte}']",      
+            f"article[id='{idParte}']",  
+            f"div.textoNorma[id*='{idParte}']", 
+            f"div.textoArticulo[id*='{idParte}']",
+            f"div[id='{idParte}']",
+            f"div[id^='p{idParte}']" 
+        ]
+        div_contenido = None; selector_usado = "Ninguno"
+        for selector_idx, selector in enumerate(selectores_posibles):
+            logger.debug(f"Intentando selector HTML #{selector_idx + 1}: '{selector}'")
+            try:
+                div_temp = soup.select_one(selector)
+                if div_temp: 
+                    div_contenido = div_temp
+                    selector_usado = selector
+                    logger.info(f"Contenido encontrado para idParte '{idParte}' usando selector CSS '{selector}'")
+                    break
+                else:
+                    logger.debug(f"Selector '{selector}' no encontró nada.")
+            except Exception as e_selector: 
+                logger.warning(f"Error al usar selector '{selector}': {e_selector}")
+                continue 
+
+        if not div_contenido: 
+            logger.info(f"Selectores específicos no encontraron contenido para idParte '{idParte}'. Intentando fallback con regex en ID.")
+            try:
+                div_contenido = soup.find("div", id=re.compile(f".*{re.escape(idParte)}.*", re.IGNORECASE))
+                if div_contenido: 
+                    selector_usado = f"Fallback regex: div con id que contiene '{idParte}' (id real: {div_contenido.get('id')})"
+                    logger.info(f"Contenido encontrado para idParte '{idParte}' usando {selector_usado}")
+                else: 
+                    error_message = f"No se encontró contenido para idParte '{idParte}' en norma '{idNorma}' con los selectores probados en {url}."
+                    logger.error(error_message)
+                    if len(response.text) < 20000: 
+                        logger.debug(f"HTML completo donde no se encontró idParte '{idParte}':\n{response.text}")
+                    else:
+                        logger.debug(f"HTML (primeros 20000 chars) donde no se encontró idParte '{idParte}':\n{response.text[:20000]}")
+                    raise HTTPException(status_code=404, detail=error_message) 
+            except HTTPException as http_exc_inner: 
+                raise http_exc_inner
+            except Exception as e_fallback:
+                logger.exception(f"Error durante el fallback de búsqueda de div_contenido para idParte '{idParte}'.")
+                raise HTTPException(status_code=500, detail=f"Error interno al intentar fallback de búsqueda para idParte '{idParte}'.")
+        
+        texto_extraido = div_contenido.get_text(separator="\n", strip=True)
+        texto_limpio_final = limpiar_texto_articulo(texto_extraido)
+
+        if len(texto_limpio_final) > MAX_TEXT_LENGTH: 
+            logger.warning(f"Texto HTML para idNorma {idNorma}, idParte {idParte} truncado. Longitud original: {len(texto_limpio_final)}")
+            texto_limpio_final = texto_limpio_final[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE_TEXT
+        
+        return ArticuloHTML(idNorma=idNorma, idParte=idParte, url_fuente=url, selector_usado=selector_usado, texto_html_extraido=texto_limpio_final)
+    except HTTPException as http_exc: 
+        raise http_exc 
+    except Exception as e: 
+        error_message = f"Error al parsear HTML o extraer texto para idNorma {idNorma}, idParte {idParte}."
+        logger.exception(error_message) 
+        raise HTTPException(status_code=500, detail=f"Error al procesar el contenido HTML para idParte '{idParte}': {e}")
 
 # Ejemplo para ejecutar con Uvicorn (si este archivo se llama main.py):
 # uvicorn main:app --reload --log-level debug
