@@ -447,9 +447,9 @@ async def consultar_articulo_html(
                     else:
                         logger.debug(f"HTML (primeros 20000 chars) donde no se encontró idParte '{idParte}':\n{response.text[:20000]}")
                     raise HTTPException(status_code=404, detail=error_message) # Devolver 404 si no se encuentra
-            except HTTPException as http_exc_inner: 
+            except HTTPException as http_exc_inner: # Re-lanzar la HTTPException del bloque interno si fue un 404
                 raise http_exc_inner
-            except Exception as e_fallback:
+            except Exception as e_fallback: # Capturar otros errores del fallback
                 logger.exception(f"Error durante el fallback de búsqueda de div_contenido para idParte '{idParte}'.")
                 raise HTTPException(status_code=500, detail=f"Error interno al intentar fallback de búsqueda para idParte '{idParte}'.")
         
