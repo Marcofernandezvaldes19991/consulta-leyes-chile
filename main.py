@@ -114,7 +114,7 @@ class ArticuloHTML(BaseModel):
 def normalizar_numero_articulo_para_comparacion(num_str: Optional[str]) -> str:
     if not num_str: 
         return "s/n"
-    s = str(num_str).lower().strip() # 's' se define aquí, ANTES de cualquier uso
+    s = str(num_str).lower().strip() # 's' se define aquí
     logger.debug(f"Normalizando: '{num_str}' -> '{s}' (inicial)")
     
     s = re.sub(r"^(artículo|articulo|art\.?|nro\.?|n[º°]|disposición|disp\.?)\s*", "", s, flags=re.IGNORECASE).strip()
@@ -407,6 +407,7 @@ async def consultar_articulo_html(
 
     try:
         soup = BeautifulSoup(response.text, "html.parser")
+        # Selectores ajustados y priorizados
         selectores_posibles = [
             f"div.textoNorma[id^='p{idParte}']",      
             f"article[id='{idParte}']",  
@@ -445,7 +446,7 @@ async def consultar_articulo_html(
                         logger.debug(f"HTML completo donde no se encontró idParte '{idParte}':\n{response.text}")
                     else:
                         logger.debug(f"HTML (primeros 20000 chars) donde no se encontró idParte '{idParte}':\n{response.text[:20000]}")
-                    raise HTTPException(status_code=404, detail=error_message) 
+                    raise HTTPException(status_code=404, detail=error_message) # Devolver 404 si no se encuentra
             except HTTPException as http_exc_inner: 
                 raise http_exc_inner
             except Exception as e_fallback:
@@ -460,9 +461,9 @@ async def consultar_articulo_html(
             texto_limpio_final = texto_limpio_final[:MAX_TEXT_LENGTH].rsplit(' ', 1)[0] + TRUNCATION_MESSAGE_TEXT
         
         return ArticuloHTML(idNorma=idNorma, idParte=idParte, url_fuente=url, selector_usado=selector_usado, texto_html_extraido=texto_limpio_final)
-    except HTTPException as http_exc: 
+    except HTTPException as http_exc: # Asegurarse de que las HTTPExceptions generadas se propaguen
         raise http_exc 
-    except Exception as e: 
+    except Exception as e: # Capturar cualquier otro error de parseo o extracción
         error_message = f"Error al parsear HTML o extraer texto para idNorma {idNorma}, idParte {idParte}."
         logger.exception(error_message) 
         raise HTTPException(status_code=500, detail=f"Error al procesar el contenido HTML para idParte '{idParte}': {e}")
