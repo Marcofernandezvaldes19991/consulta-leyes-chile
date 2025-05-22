@@ -1,11 +1,12 @@
 # main.py
 # API de Consulta de Leyes Chilenas
-# Versión 2.3.0 – Compatibilidad Plugin GPT y /ley_html
+# Versión 2.3.1 – Corrección de AttributeError en búsquedas XML
 
 import logging
 import os
 import json
 import re
+import asyncio
 from typing import Optional, List
 
 import httpx
@@ -22,27 +23,26 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
-logger.info("API v2.3.0 INICIANDO...")
+logger.info("API v2.3.1 INICIANDO...")
 
 # --- FastAPI & CORS ---
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
     description="Consulta leyes chilenas (XML) y artículos (HTML) de LeyChile.cl",
-    version="2.3.0",
+    version="2.3.1",
     servers=[{"url": "https://consulta-leyes-chile.onrender.com", "description": "Producción"}],
 )
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],                # o especifica ["https://chat.openai.com"]
-    allow_credentials=True,
+    allow_origins=["*"],    # O restringe a tu dominio de plugin: ["https://chat.openai.com"]
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 # --- Caché ---
 cache_id_norma = TTLCache(maxsize=100, ttl=3600)
-cache_xml_ley = TTLCache(maxsize=50, ttl=3600)
+cache_xml_ley  = TTLCache(maxsize=50,  ttl=3600)
 
 # --- Fallback IDs ---
 try:
@@ -55,13 +55,17 @@ except Exception:
     logger.warning("No se cargaron fallbacks.")
 
 # --- Constantes ---
-ROMAN_TO_INT = { 'i':1, 'ii':2, 'iii':3, 'iv':4, 'v':5, 'vi':6, 'vii':7, 'viii':8, 'ix':9, 'x':10 }
-WORDS_TO_INT = { 'primero':'1','segundo':'2','tercero':'3','cuarto':'4','quinto':'5',
-                 'sexto':'6','séptimo':'7','octavo':'8','noveno':'9','décimo':'10' }
+ROMAN_TO_INT = {
+    "i":1, "ii":2, "iii":3, "iv":4, "v":5, "vi":6, "vii":7, "viii":8, "ix":9, "x":10
+}
+WORDS_TO_INT = {
+    "primero":"1","segundo":"2","tercero":"3","cuarto":"4","quinto":"5",
+    "sexto":"6","séptimo":"7","octavo":"8","noveno":"9","décimo":"10"
+}
 MAX_TEXT_LENGTH = 10000
 MAX_ARTICULOS_RETURNED = 15
 TRUNC_TEXT = "\n\n[... texto truncado ...]"
-TRUNC_LIST  = f"Mostrando primeros {MAX_ARTICULOS_RETURNED} artículos. La ley tiene más."
+TRUNC_LIST = f"Mostrando primeros {MAX_ARTICULOS_RETURNED} artículos. La ley tiene más."
 
 # --- Modelos Pydantic ---
 class Articulo(BaseModel):
@@ -87,7 +91,7 @@ class ArticuloHTML(BaseModel):
     selector_usado: str
     texto_html_extraido: str
 
-# --- Helpers de normalización y extracción ---
+# --- Helpers ---
 def normalizar_articulo(num_str: Optional[str]) -> str:
     if not num_str: return "s/n"
     s = num_str.lower().strip()
@@ -111,34 +115,36 @@ def extraer_referencias(txt: str) -> List[str]:
             refs.add(m.group(0).strip())
     return sorted(refs)
 
-# --- Llamadas asíncronas a LeyChile ---
-import asyncio
-
+# --- Llamadas a LeyChile ---
 async def obtener_id_norma(n_ley: str, client: httpx.AsyncClient) -> Optional[str]:
     clave = n_ley.strip().replace(".", "")
-    if (cached:=cache_id_norma.get(clave)): return cached
+    if (cid:=cache_id_norma.get(clave)): return cid
     if clave in fallback_ids:
         cache_id_norma[clave] = fallback_ids[clave]
         return fallback_ids[clave]
     url = f"https://www.leychile.cl/Consulta/indice_normas_busqueda_simple?formato=xml&modo=1&busqueda=ley+{clave}"
-    for i in range(3):
+    for _ in range(3):
         try:
             r = await client.get(url, timeout=10)
             r.raise_for_status()
             soup = BeautifulSoup(r.content, "xml")
             for norma in soup.find_all("Norma"):
-                num = norma.find_text("Numero") or ""
-                if num.replace(".", "") == clave:
-                    idn = norma.find_text("IdNorma") or ""
-                    cache_id_norma[clave] = idn
-                    return idn
+                # CORRECCIÓN: usamos find(...) en lugar de find_text(...)
+                tag_num  = norma.find("Numero")
+                num_text = tag_num.text.strip().replace(".", "") if tag_num and tag_num.text else ""
+                if num_text == clave:
+                    tag_id = norma.find("IdNorma")
+                    idn    = tag_id.text.strip() if tag_id and tag_id.text else None
+                    if idn:
+                        cache_id_norma[clave] = idn
+                        return idn
             return None
         except Exception:
             await asyncio.sleep(1)
     return None
 
 async def obtener_xml_ley(idn: str, client: httpx.AsyncClient) -> Optional[bytes]:
-    if (cached:=cache_xml_ley.get(idn)): return cached
+    if (cxml:=cache_xml_ley.get(idn)): return cxml
     url = f"https://www.leychile.cl/Consulta/obtxml?opt=7&idNorma={idn}&notaPIE=1"
     try:
         r = await client.get(url, timeout=15)
@@ -152,9 +158,12 @@ def extraer_articulos(xml_data: bytes) -> List[Articulo]:
     soup = BeautifulSoup(xml_data, "lxml-xml")
     arts = []
     for ef in soup.find_all("EstructuraFuncional"):
-        if "artículo" not in (ef.get("tipoParte") or "").lower(): continue
+        if "artículo" not in (ef.get("tipoParte") or "").lower():
+            continue
         idp = ef.get("idParte")
-        txt = ef.find_text("Texto") or ""
+        # CORRECCIÓN: find(...) + .text en lugar de find_text(...)
+        tag_txt = ef.find("Texto")
+        txt     = tag_txt.text if tag_txt and tag_txt.text else ""
         m = re.match(r"^\s*([\w\s]+?)[:\-\.\n](.*)$", txt, re.DOTALL)
         disp = m.group(1).strip() if m else txt[:20]
         body = m.group(2).strip() if m else ""
@@ -188,8 +197,8 @@ async def consultar_ley(
             raise HTTPException(503, "No pude obtener el XML de la ley.")
     lista = extraer_articulos(xml)
     if not lista:
-        raise HTTPException(404, "No extraí artículos de la ley.")
-    # Si piden un artículo concreto
+        raise HTTPException(404, "No extraje artículos de la ley.")
+    # Si piden artículo específico
     if articulo:
         norm = normalizar_articulo(articulo)
         for art in lista:
@@ -201,11 +210,9 @@ async def consultar_ley(
                     total_articulos_originales_en_ley=len(lista)
                 )
         raise HTTPException(404, f"No hallé artículo {articulo}")
-    # Lista completa (o truncada)
+    # Lista (o truncada)
     out = lista if len(lista) <= MAX_ARTICULOS_RETURNED else lista[:MAX_ARTICULOS_RETURNED]
-    nota = None
-    if len(lista) > MAX_ARTICULOS_RETURNED:
-        nota = TRUNC_LIST
+    nota = TRUNC_LIST if len(lista) > MAX_ARTICULOS_RETURNED else None
     return LeyDetalle(
         ley=numero_ley, id_norma=idn,
         articulos_totales_en_respuesta=len(out),
@@ -217,7 +224,7 @@ async def consultar_ley(
 @app.get("/ley_html", response_model=ArticuloHTML, summary="Consultar artículo (HTML scraping)")
 async def consultar_articulo_html(
     id_norma: str = Query(..., alias="idNorma", description="IDNorma de la ley"),
-    id_parte: str = Query(..., alias="idParte", description="IdParte del artículo")
+    id_parte: str  = Query(..., alias="idParte", description="IdParte del artículo")
 ):
     url = f"https://www.bcn.cl/leychile/navegar?idNorma={id_norma}&idParte={id_parte}"
     async with httpx.AsyncClient() as client:
@@ -225,7 +232,7 @@ async def consultar_articulo_html(
         if r.status_code != 200:
             raise HTTPException(502, "Error al obtener HTML de la BCN")
         soup = BeautifulSoup(r.text, "html.parser")
-        sel = soup.select_one(f"div.textoNorma[id*='{id_parte}'], div[id*='{id_parte}']")
+        sel  = soup.select_one(f"div.textoNorma[id*='{id_parte}'], div[id*='{id_parte}']")
         if not sel:
             return ArticuloHTML(
                 idNorma=id_norma, idParte=id_parte,
@@ -237,11 +244,11 @@ async def consultar_articulo_html(
             txt = txt[:MAX_TEXT_LENGTH] + TRUNC_TEXT
         return ArticuloHTML(
             idNorma=id_norma, idParte=id_parte,
-            url_fuente=url, selector_usado=sel.name + ("#"+sel.get("id") if sel.get("id") else ""),
+            url_fuente=url,
+            selector_usado=sel.name + (f"#{sel.get('id')}" if sel.get('id') else ""),
             texto_html_extraido=txt
         )
 
-# --- Healthcheck ---
 @app.get("/health", summary="Estado del servicio")
 def health():
     return {"status": "ok"}
