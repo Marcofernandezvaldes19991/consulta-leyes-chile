@@ -1,6 +1,6 @@
 # main.py
 # API de Consulta de Leyes Chilenas
-# Versión 2.3.1 – Corrección de AttributeError en extracción de artículos
+# Versión 2.3.2 – Compatibilidad snake_case y camelCase en parámetros
 
 import logging
 import os
@@ -23,18 +23,18 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
-logger.info("API v2.3.1 INICIANDO...")
+logger.info("API v2.3.2 INICIANDO...")
 
 # --- FastAPI & CORS ---
 app = FastAPI(
     title="API de Consulta de Leyes Chilenas",
-    version="2.3.1",
+    version="2.3.2",
     description="Consulta leyes chilenas (XML) y artículos (HTML) de LeyChile.cl",
     servers=[{"url": "https://consulta-leyes-chile.onrender.com", "description": "Producción"}],
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Puedes restringir a ["https://chat.openai.com"]
+    allow_origins=["*"],    # Puedes restringir a tu dominio de plugin: ["https://chat.openai.com"]
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,
@@ -46,8 +46,8 @@ cache_xml_ley  = TTLCache(maxsize=50,  ttl=3600)
 
 # --- Fallback IDs ---
 try:
-    base = os.path.dirname(os.path.abspath(__file__))
-    with open(os.path.join(base, "fallbacks.json"), encoding="utf-8") as f:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(base_dir, "fallbacks.json"), encoding="utf-8") as f:
         fallback_ids = json.load(f)
     logger.info("Fallbacks cargados exitosamente.")
 except Exception:
@@ -134,10 +134,10 @@ async def obtener_id_norma(n_ley: str, client: httpx.AsyncClient) -> Optional[st
             soup = BeautifulSoup(r.content, "xml")
             for norma in soup.find_all("Norma"):
                 tag_num = norma.find("Numero")
-                num    = tag_num.text.strip().replace(".", "") if tag_num and tag_num.text else ""
+                num = tag_num.text.strip().replace(".", "") if tag_num and tag_num.text else ""
                 if num == clave:
                     tag_id = norma.find("IdNorma")
-                    idn    = tag_id.text.strip() if tag_id and tag_id.text else None
+                    idn = tag_id.text.strip() if tag_id and tag_id.text else None
                     if idn:
                         cache_id_norma[clave] = idn
                         return idn
@@ -165,9 +165,8 @@ def extraer_articulos(xml_data: bytes) -> List[Articulo]:
         if "artículo" not in (ef.get("tipoParte") or "").lower():
             continue
         idp = ef.get("idParte")
-        # --- CORRECCIÓN: find(...) + .text en lugar de find_text() ---
         tag_txt = ef.find("Texto")
-        txt     = tag_txt.text if tag_txt and tag_txt.text else ""
+        txt = tag_txt.text if tag_txt and tag_txt.text else ""
         m = re.match(r"^\s*([\w\s]+?)[:\-\.\n](.*)$", txt, re.DOTALL)
         disp = m.group(1).strip() if m else txt[:20]
         body = m.group(2).strip() if m else ""
@@ -189,13 +188,29 @@ def extraer_articulos(xml_data: bytes) -> List[Articulo]:
 
 @app.get("/ley", response_model=LeyDetalle, summary="Consultar ley (XML)")
 async def consultar_ley(
-    numero_ley: str = Query(..., alias="numeroLey", description="Número de la ley (ej. 21595)"),
-    articulo: Optional[str] = Query(None, alias="articulo", description="Artículo (ej. 15, 1 bis)")
+    numero_ley: Optional[str] = Query(
+        None,
+        description="Número de la ley (snake_case, ej. 21595)"
+    ),
+    numeroLey: Optional[str] = Query(
+        None,
+        description="Número de la ley (camelCase, ej. 21595)"
+    ),
+    articulo: Optional[str] = Query(
+        None,
+        description="Artículo (ej. 15, 1 bis)"
+    )
 ):
+    numero = numero_ley or numeroLey
+    if not numero:
+        raise HTTPException(
+            status_code=422,
+            detail="Debes especificar `numero_ley` o `numeroLey`."
+        )
     async with httpx.AsyncClient() as client:
-        idn = await obtener_id_norma(numero_ley, client)
+        idn = await obtener_id_norma(numero, client)
         if not idn:
-            raise HTTPException(404, f"No hallé IDNorma para ley {numero_ley}")
+            raise HTTPException(404, f"No hallé IDNorma para ley {numero}")
         xml = await obtener_xml_ley(idn, client)
         if not xml:
             raise HTTPException(503, "No pude obtener el XML de la ley.")
@@ -207,7 +222,7 @@ async def consultar_ley(
         for art in lista:
             if art.articulo_id_interno == norm:
                 return LeyDetalle(
-                    ley=numero_ley,
+                    ley=numero,
                     id_norma=idn,
                     articulos_totales_en_respuesta=1,
                     articulos=[art],
@@ -217,7 +232,7 @@ async def consultar_ley(
     out = lista if len(lista) <= MAX_ARTICULOS_RETURNED else lista[:MAX_ARTICULOS_RETURNED]
     nota = TRUNC_LIST if len(lista) > MAX_ARTICULOS_RETURNED else None
     return LeyDetalle(
-        ley=numero_ley,
+        ley=numero,
         id_norma=idn,
         articulos_totales_en_respuesta=len(out),
         articulos=out,
@@ -227,20 +242,29 @@ async def consultar_ley(
 
 @app.get("/ley_html", response_model=ArticuloHTML, summary="Consultar artículo (HTML scraping)")
 async def consultar_articulo_html(
-    id_norma: str = Query(..., alias="idNorma", description="IDNorma de la ley"),
-    id_parte: str  = Query(..., alias="idParte", description="IdParte del artículo")
+    id_norma: Optional[str] = Query(None, description="IDNorma (snake_case)"),
+    idNorma:   Optional[str] = Query(None, description="IDNorma (camelCase)"),
+    id_parte:  Optional[str] = Query(None, description="IdParte (snake_case)"),
+    idParte:   Optional[str] = Query(None, description="IdParte (camelCase)")
 ):
-    url = f"https://www.bcn.cl/leychile/navegar?idNorma={id_norma}&idParte={id_parte}"
+    inorma = id_norma or idNorma
+    iparte = id_parte or idParte
+    if not inorma or not iparte:
+        raise HTTPException(
+            status_code=422,
+            detail="Debes pasar `id_norma` o `idNorma` Y `id_parte` o `idParte`."
+        )
+    url = f"https://www.bcn.cl/leychile/navegar?idNorma={inorma}&idParte={iparte}"
     async with httpx.AsyncClient() as client:
         r = await client.get(url, timeout=10)
         if r.status_code != 200:
             raise HTTPException(502, "Error al obtener HTML de la BCN")
         soup = BeautifulSoup(r.text, "html.parser")
-        sel = soup.select_one(f"div.textoNorma[id*='{id_parte}'], div[id*='{id_parte}']")
+        sel = soup.select_one(f"div.textoNorma[id*='{iparte}'], div[id*='{iparte}']")
         if not sel:
             return ArticuloHTML(
-                idNorma=id_norma,
-                idParte=id_parte,
+                idNorma=inorma,
+                idParte=iparte,
                 url_fuente=url,
                 selector_usado="ninguno",
                 texto_html_extraido=f"⚠️ No encontré el artículo. Sigue este enlace:\n{url}"
@@ -249,8 +273,8 @@ async def consultar_articulo_html(
         if len(txt) > MAX_TEXT_LENGTH:
             txt = txt[:MAX_TEXT_LENGTH] + TRUNC_TEXT
         return ArticuloHTML(
-            idNorma=id_norma,
-            idParte=id_parte,
+            idNorma=inorma,
+            idParte=iparte,
             url_fuente=url,
             selector_usado=sel.name + (f"#{sel.get('id')}" if sel.get("id") else ""),
             texto_html_extraido=txt
