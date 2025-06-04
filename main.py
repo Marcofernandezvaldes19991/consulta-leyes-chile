@@ -256,9 +256,19 @@ async def consultar_articulo_html(
         )
     url = f"https://www.bcn.cl/leychile/navegar?idNorma={inorma}&idParte={iparte}"
     async with httpx.AsyncClient() as client:
-        r = await client.get(url, timeout=10)
-        if r.status_code != 200:
+        try:
+            r = await client.get(url, timeout=10)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "Código %s al obtener HTML: %s",
+                exc.response.status_code,
+                exc.request.url,
+            )
             raise HTTPException(502, "Error al obtener HTML de la BCN")
+        except httpx.RequestError as exc:
+            logger.warning("Error de conexión al obtener HTML: %s", exc.request.url)
+            raise HTTPException(503, "No pude conectarme a la BCN")
         soup = BeautifulSoup(r.text, "html.parser")
         sel = soup.select_one(f"div.textoNorma[id*='{iparte}'], div[id*='{iparte}']")
         if not sel:
