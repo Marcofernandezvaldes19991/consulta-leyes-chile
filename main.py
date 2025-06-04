@@ -47,9 +47,10 @@ cache_xml_ley  = TTLCache(maxsize=50,  ttl=3600)
 # --- Fallback IDs ---
 try:
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    with open(os.path.join(base_dir, "fallbacks.json"), encoding="utf-8") as f:
+    fb_path = os.getenv("FALLBACKS_FILE", os.path.join(base_dir, "fallbacks.json"))
+    with open(fb_path, encoding="utf-8") as f:
         fallback_ids = json.load(f)
-    logger.info("Fallbacks cargados exitosamente.")
+    logger.info("Fallbacks cargados exitosamente desde %s", fb_path)
 except Exception:
     fallback_ids = {}
     logger.warning("No se cargaron fallbacks.")
@@ -59,13 +60,23 @@ ROMAN_TO_INT = {
     "i":1,"ii":2,"iii":3,"iv":4,"v":5,"vi":6,"vii":7,"viii":8,"ix":9,"x":10
 }
 WORDS_TO_INT = {
-    "primero":"1","segundo":"2","tercero":"3","cuarto":"4","quinto":"5",
-    "sexto":"6","séptimo":"7","octavo":"8","noveno":"9","décimo":"10"
+    "primero": "1",
+    "segundo": "2",
+    "tercero": "3",
+    "cuarto": "4",
+    "quinto": "5",
+    "sexto": "6",
+    "séptimo": "7",
+    "octavo": "8",
+    "noveno": "9",
+    "décimo": "10",
 }
-MAX_TEXT_LENGTH = 10000
-MAX_ARTICULOS_RETURNED = 15
+MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "10000"))
+MAX_ARTICULOS_RETURNED = int(os.getenv("MAX_ARTICULOS_RETURNED", "15"))
 TRUNC_TEXT = "\n\n[... texto truncado ...]"
-TRUNC_LIST = f"Mostrando primeros {MAX_ARTICULOS_RETURNED} artículos. La ley tiene más."
+TRUNC_LIST = (
+    f"Mostrando primeros {MAX_ARTICULOS_RETURNED} artículos. La ley tiene más."
+)
 
 # --- Modelos Pydantic ---
 class Articulo(BaseModel):
@@ -280,6 +291,21 @@ async def consultar_articulo_html(
             texto_html_extraido=txt
         )
 
+@app.get("/", summary="Información de la API")
+def root():
+    """Endpoint raíz sencillo para verificar funcionamiento."""
+    return {"mensaje": "API Consulta Leyes Chile operativa"}
+
 @app.get("/health", summary="Estado del servicio")
 def health():
     return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+    )
