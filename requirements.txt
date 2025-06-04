@@ -3,5 +3,5 @@ uvicorn
 requests
 beautifulsoup4
 lxml
-httpx
+httpx<0.28
 cachetools
