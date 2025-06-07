@@ -186,6 +186,15 @@ def extraer_articulos(xml_data: bytes) -> List[Articulo]:
 
 # --- Endpoints ---
 
+@app.api_route("/", methods=["GET", "HEAD"], summary="Información básica")
+async def index() -> dict:
+    """Endpoint raíz simple para indicar que el servicio funciona."""
+    return {
+        "mensaje": "API de Consulta de Leyes Chilenas",
+        "version": app.version,
+        "documentacion": app.docs_url,
+    }
+
 @app.get("/ley", response_model=LeyDetalle, summary="Consultar ley (XML)")
 async def consultar_ley(
     numero_ley: Optional[str] = Query(

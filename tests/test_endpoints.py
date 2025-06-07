@@ -6,6 +6,16 @@ from main import app
 client = TestClient(app)
 
 
+def test_root():
+    response = client.get("/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("documentacion") == app.docs_url
+    assert "mensaje" in data
+    assert "version" in data
+    head = client.head("/")
+    assert head.status_code == 200
+
 def test_health():
     response = client.get("/health")
     assert response.status_code == 200
