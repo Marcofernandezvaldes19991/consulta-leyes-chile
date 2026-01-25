@@ -101,7 +101,7 @@ def normalizar_articulo(num_str: Optional[str]) -> str:
         return WORDS_TO_INT[s]
     if s in ROMAN_TO_INT:
         return str(ROMAN_TO_INT[s])
-    nums = re.findall(r"(\d+)([a-z]*)", s)
+    nums = re.findall(r"(\d+)\s*([a-z]*)", s)
     comps = [n + t for n, t in nums]
     return "".join(comps) or s
 
