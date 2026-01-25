@@ -141,7 +141,6 @@ async def obtener_id_norma(n_ley: str, client: httpx.AsyncClient) -> Optional[st
                     if idn:
                         cache_id_norma[clave] = idn
                         return idn
-            return None
         except Exception:
             await asyncio.sleep(1)
     return None
